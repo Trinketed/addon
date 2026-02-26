@@ -2,7 +2,8 @@
   {
     "name": "Trinketed",
     "description": "Core framework & shared library",
-    "color": "#D4AA44"
+    "color": "#D4AA44",
+    "required": true
   },
   {
     "name": "TrinketedCD",
