@@ -1,0 +1,6 @@
+[submodule "TrinketedCD"]
+	path = TrinketedCD
+	url = /home/nholden/projects/TrinketedCD
+[submodule "TrinketedHistory"]
+	path = TrinketedHistory
+	url = /home/nholden/projects/TrinketedHistory

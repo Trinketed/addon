@@ -1,0 +1,24 @@
+name: Package and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Package and Release
+        uses: BigWigsMods/packager@v2
+        with:
+          args: -g classic
+        env:
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,13 @@
+## Interface: 110207
+## Title: Trinketed
+## Notes: Trinketed addon suite framework
+## Author: apwek
+## Version: @project-version@
+## SavedVariables: TrinketedDB
+
+Libs\LibStub\LibStub.lua
+Libs\LibDeflate\LibDeflate.lua
+TrinketedLib\TrinketedLib.lua
+TrinketedLib\Widgets.lua
+TrinketedLib\OptionsPanel.lua
+Trinketed.lua

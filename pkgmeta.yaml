@@ -1,0 +1,17 @@
+package-as: Trinketed
+
+externals:
+  Libs/LibStub: https://repos.wowace.com/wow/libstub/trunk
+  Libs/LibDeflate: https://repos.curseforge.com/wow/libdeflate/trunk
+
+move-folders:
+  Trinketed/TrinketedCD: TrinketedCD
+  Trinketed/TrinketedHistory: TrinketedHistory
+
+ignore:
+  - .github
+  - docs
+  - "*.md"
+  - .gitignore
+  - .gitmodules
+  - pkgmeta.yaml
