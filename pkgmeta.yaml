@@ -2,7 +2,9 @@ package-as: Trinketed
 
 externals:
   Libs/LibStub: https://repos.wowace.com/wow/libstub/trunk
-  Libs/LibDeflate: https://repos.curseforge.com/wow/libdeflate/trunk
+  Libs/LibDeflate:
+    url: https://github.com/SafeteeWoW/LibDeflate
+    tag: latest
 
 move-folders:
   Trinketed/TrinketedCD: TrinketedCD
