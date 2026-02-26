@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Trinketed",
+    "description": "Core framework & shared library",
+    "color": "#D4AA44"
+  },
+  {
+    "name": "TrinketedCD",
+    "description": "Arena cooldown tracker",
+    "color": "#3B82F6"
+  },
+  {
+    "name": "TrinketedHistory",
+    "description": "Match history & VOD timestamps",
+    "color": "#22C55E"
+  }
+]
