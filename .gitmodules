@@ -1,6 +1,6 @@
 [submodule "TrinketedCD"]
 	path = TrinketedCD
-	url = /home/nholden/projects/TrinketedCD
+	url = git@github.com:Trinketed/cd.git
 [submodule "TrinketedHistory"]
 	path = TrinketedHistory
-	url = /home/nholden/projects/TrinketedHistory
+	url = git@github.com:Trinketed/history.git
