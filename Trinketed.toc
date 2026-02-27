@@ -2,7 +2,7 @@
 ## Title: Trinketed
 ## Notes: Trinketed addon suite framework
 ## Author: apwek
-## Version: @project-version@
+## Version: v0.1.2
 ## SavedVariables: TrinketedDB
 
 Libs\LibStub\LibStub.lua
