@@ -19,6 +19,7 @@ jobs:
       - name: Bump patch version and create tag
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.RELEASE_TOKEN }}
           script: |
             // Get all tags matching v*
             const { data: refs } = await github.rest.git.listMatchingRefs({
