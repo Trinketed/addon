@@ -1,0 +1,56 @@
+name: Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump patch version and create tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Get all tags matching v*
+            const { data: refs } = await github.rest.git.listMatchingRefs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'tags/v',
+            });
+
+            let newTag = 'v0.1.0';
+            if (refs.length > 0) {
+              // Sort semver descending
+              const tags = refs
+                .map(r => r.ref.replace('refs/tags/', ''))
+                .filter(t => /^v\d+\.\d+\.\d+$/.test(t))
+                .sort((a, b) => {
+                  const pa = a.replace('v','').split('.').map(Number);
+                  const pb = b.replace('v','').split('.').map(Number);
+                  return pb[0]-pa[0] || pb[1]-pa[1] || pb[2]-pa[2];
+                });
+
+              if (tags.length > 0) {
+                const [major, minor, patch] = tags[0].replace('v','').split('.').map(Number);
+                newTag = `v${major}.${minor}.${patch + 1}`;
+              }
+            }
+
+            // Create tag via API (this triggers other workflows)
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/${newTag}`,
+              sha: context.sha,
+            });
+
+            core.info(`Created tag ${newTag}`);
