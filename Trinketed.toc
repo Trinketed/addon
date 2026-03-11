@@ -9,5 +9,6 @@ Libs\LibStub\LibStub.lua
 Libs\LibDeflate\LibDeflate.lua
 TrinketedLib\TrinketedLib.lua
 TrinketedLib\Widgets.lua
+TrinketedLib\WindowFrame.lua
 TrinketedLib\OptionsPanel.lua
 Trinketed.lua

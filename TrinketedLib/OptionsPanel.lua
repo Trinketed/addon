@@ -68,7 +68,7 @@ local function BuildMasterFrame()
     local verText = sidebar:CreateFontString(nil, "OVERLAY")
     verText:SetFont(lib.FONT_MONO, 9, "")
     verText:SetPoint("TOP", brandText, "BOTTOM", 0, -3)
-    verText:SetText("")
+    verText:SetText(C_AddOns.GetAddOnMetadata("Trinketed", "Version") or "")
     verText:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
 
     local brandSep = sidebar:CreateTexture(nil, "ARTWORK")

@@ -14,7 +14,7 @@ microTip:Hide()
 
 local microTipBg = microTip:CreateTexture(nil, "BACKGROUND")
 microTipBg:SetAllPoints()
-microTipBg:SetColorTexture(0.039, 0.039, 0.039, 0.92)
+microTipBg:SetColorTexture(C.sidebarBg[1], C.sidebarBg[2], C.sidebarBg[3], 0.92)
 
 local microTipText = microTip:CreateFontString(nil, "OVERLAY")
 microTipText:SetFont(lib.FONT_BODY, 10, "")
@@ -160,36 +160,180 @@ function lib:CreateCheckbox(parent, x, y, label, checked, onClick)
 end
 
 ---------------------------------------------------------------------------
--- Slider
+-- Slider (fully custom — no Blizzard template)
 ---------------------------------------------------------------------------
+local sliderDrag = { active = false, slider = nil }
+
+local dragTracker = CreateFrame("Frame", nil, UIParent)
+dragTracker:Hide()
+dragTracker:SetScript("OnUpdate", function()
+    if not sliderDrag.active then dragTracker:Hide(); return end
+    local s = sliderDrag.slider
+    local cx = GetCursorPosition() / UIParent:GetEffectiveScale()
+    local left = s.track:GetLeft()
+    local width = s.track:GetWidth()
+    local pct = (cx - left) / width
+    pct = math.max(0, math.min(1, pct))
+    local raw = s._min + pct * (s._max - s._min)
+    local snapped = math.floor((raw - s._min) / s._step + 0.5) * s._step + s._min
+    snapped = math.max(s._min, math.min(s._max, snapped))
+    s:_SetValue(snapped)
+end)
+
 function lib:CreateSlider(parent, x, y, label, minVal, maxVal, step, current, onChange)
-    local sliderLabel = parent:CreateFontString(nil, "OVERLAY")
+    local TRACK_W, TRACK_H = 200, 4
+    local THUMB_W, THUMB_H = 12, 12
+
+    local container = CreateFrame("Frame", nil, parent)
+    container:SetSize(TRACK_W + THUMB_W + 60, 32)
+    container:SetPoint("TOPLEFT", x, y)
+
+    local sliderLabel = container:CreateFontString(nil, "OVERLAY")
     sliderLabel:SetFont(self.FONT_BODY, 11, "")
-    sliderLabel:SetPoint("TOPLEFT", x, y)
+    sliderLabel:SetPoint("TOPLEFT", 0, 0)
     sliderLabel:SetText(label)
     sliderLabel:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
 
-    local slider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate")
-    slider:SetPoint("TOPLEFT", x + 10, y - 16)
-    slider:SetSize(200, 17)
-    slider:SetMinMaxValues(minVal, maxVal)
-    slider:SetValueStep(step)
-    slider:SetObeyStepOnDrag(true)
-    slider:SetValue(current)
-
-    local valText = slider:CreateFontString(nil, "OVERLAY")
+    local valText = container:CreateFontString(nil, "OVERLAY")
     valText:SetFont(self.FONT_MONO, 10, "")
-    valText:SetPoint("LEFT", slider, "RIGHT", 8, 0)
+    valText:SetPoint("TOPRIGHT", 0, 0)
     valText:SetText(tostring(math.floor(current)))
     valText:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
 
-    slider:SetScript("OnValueChanged", function(self, value)
-        local rounded = math.floor(value)
-        valText:SetText(tostring(rounded))
-        if onChange then onChange(rounded) end
+    -- Track
+    local track = CreateFrame("Frame", nil, container)
+    track:SetSize(TRACK_W, TRACK_H)
+    track:SetPoint("TOPLEFT", 0, -18)
+
+    local trackBg = track:CreateTexture(nil, "BACKGROUND")
+    trackBg:SetAllPoints()
+    trackBg:SetColorTexture(C.bgElevated[1], C.bgElevated[2], C.bgElevated[3], 1)
+
+    local trackFill = track:CreateTexture(nil, "ARTWORK")
+    trackFill:SetPoint("TOPLEFT")
+    trackFill:SetPoint("BOTTOMLEFT")
+    trackFill:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.6)
+
+    -- Thumb
+    local thumb = CreateFrame("Button", nil, container)
+    thumb:SetSize(THUMB_W, THUMB_H)
+    thumb:SetFrameLevel(track:GetFrameLevel() + 2)
+
+    local thumbBg = thumb:CreateTexture(nil, "BACKGROUND")
+    thumbBg:SetAllPoints()
+    thumbBg:SetColorTexture(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
+
+    local thumbBorderTop = thumb:CreateTexture(nil, "ARTWORK")
+    thumbBorderTop:SetPoint("TOPLEFT"); thumbBorderTop:SetPoint("TOPRIGHT")
+    thumbBorderTop:SetHeight(1)
+
+    local thumbBorderBot = thumb:CreateTexture(nil, "ARTWORK")
+    thumbBorderBot:SetPoint("BOTTOMLEFT"); thumbBorderBot:SetPoint("BOTTOMRIGHT")
+    thumbBorderBot:SetHeight(1)
+
+    local thumbBorderL = thumb:CreateTexture(nil, "ARTWORK")
+    thumbBorderL:SetPoint("TOPLEFT"); thumbBorderL:SetPoint("BOTTOMLEFT")
+    thumbBorderL:SetWidth(1)
+
+    local thumbBorderR = thumb:CreateTexture(nil, "ARTWORK")
+    thumbBorderR:SetPoint("TOPRIGHT"); thumbBorderR:SetPoint("BOTTOMRIGHT")
+    thumbBorderR:SetWidth(1)
+
+    local function SetThumbBorder(r, g, b, a)
+        thumbBorderTop:SetColorTexture(r, g, b, a)
+        thumbBorderBot:SetColorTexture(r, g, b, a)
+        thumbBorderL:SetColorTexture(r, g, b, a)
+        thumbBorderR:SetColorTexture(r, g, b, a)
+    end
+    SetThumbBorder(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+
+    -- Slider state
+    local s = {}
+    s._min = minVal
+    s._max = maxVal
+    s._step = step
+    s._value = current
+    s._onChange = onChange
+    s.track = track
+    s.frame = container
+
+    local function UpdateVisual()
+        local pct = (s._value - s._min) / (s._max - s._min)
+        trackFill:SetWidth(math.max(1, pct * TRACK_W))
+        thumb:ClearAllPoints()
+        thumb:SetPoint("CENTER", track, "LEFT", pct * TRACK_W, 0)
+        valText:SetText(tostring(math.floor(s._value)))
+    end
+
+    function s:_SetValue(val)
+        if val == s._value then return end
+        s._value = val
+        UpdateVisual()
+        if s._onChange then s._onChange(math.floor(val)) end
+    end
+
+    function s:SetValue(val)
+        val = math.max(s._min, math.min(s._max, val))
+        local snapped = math.floor((val - s._min) / s._step + 0.5) * s._step + s._min
+        s._value = math.max(s._min, math.min(s._max, snapped))
+        UpdateVisual()
+    end
+
+    function s:GetValue()
+        return s._value
+    end
+
+    UpdateVisual()
+
+    -- Drag behavior
+    thumb:SetScript("OnMouseDown", function()
+        sliderDrag.active = true
+        sliderDrag.slider = s
+        SetThumbBorder(C.accent[1], C.accent[2], C.accent[3], 1)
+        dragTracker:Show()
     end)
 
-    return slider, sliderLabel
+    thumb:SetScript("OnMouseUp", function()
+        sliderDrag.active = false
+        sliderDrag.slider = nil
+        SetThumbBorder(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+        dragTracker:Hide()
+    end)
+
+    thumb:SetScript("OnEnter", function()
+        SetThumbBorder(C.accent[1], C.accent[2], C.accent[3], 0.7)
+    end)
+    thumb:SetScript("OnLeave", function()
+        if not sliderDrag.active then
+            SetThumbBorder(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+        end
+    end)
+
+    -- Click-on-track to jump
+    track:EnableMouse(true)
+    track:SetScript("OnMouseDown", function()
+        local cx = GetCursorPosition() / UIParent:GetEffectiveScale()
+        local left = track:GetLeft()
+        local width = track:GetWidth()
+        local pct = math.max(0, math.min(1, (cx - left) / width))
+        local raw = minVal + pct * (maxVal - minVal)
+        local snapped = math.floor((raw - minVal) / step + 0.5) * step + minVal
+        snapped = math.max(minVal, math.min(maxVal, snapped))
+        s:_SetValue(snapped)
+        -- Start drag from the new position
+        sliderDrag.active = true
+        sliderDrag.slider = s
+        SetThumbBorder(C.accent[1], C.accent[2], C.accent[3], 1)
+        dragTracker:Show()
+    end)
+    track:SetScript("OnMouseUp", function()
+        sliderDrag.active = false
+        sliderDrag.slider = nil
+        SetThumbBorder(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+        dragTracker:Hide()
+    end)
+
+    return container, sliderLabel
 end
 
 ---------------------------------------------------------------------------
@@ -202,7 +346,7 @@ function lib:CreateButton(parent, x, y, width, text, onClick)
 
     local bg = btn:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
-    bg:SetColorTexture(0.078, 0.078, 0.086, 1)
+    bg:SetColorTexture(C.frameBg[1], C.frameBg[2], C.frameBg[3], 1)
 
     local border = btn:CreateTexture(nil, "ARTWORK")
     border:SetPoint("TOPLEFT", -1, 1)
@@ -211,7 +355,7 @@ function lib:CreateButton(parent, x, y, width, text, onClick)
 
     local inner = btn:CreateTexture(nil, "ARTWORK", nil, 1)
     inner:SetAllPoints()
-    inner:SetColorTexture(0.078, 0.078, 0.086, 1)
+    inner:SetColorTexture(C.frameBg[1], C.frameBg[2], C.frameBg[3], 1)
 
     local btnLabel = btn:CreateFontString(nil, "OVERLAY")
     btnLabel:SetFont(self.FONT_BODY, 10, "")
@@ -224,9 +368,146 @@ function lib:CreateButton(parent, x, y, width, text, onClick)
         btnLabel:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
     end)
     btn:SetScript("OnLeave", function()
-        inner:SetColorTexture(0.078, 0.078, 0.086, 1)
+        inner:SetColorTexture(C.frameBg[1], C.frameBg[2], C.frameBg[3], 1)
         btnLabel:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
     end)
     btn:SetScript("OnClick", onClick)
     return btn
+end
+
+---------------------------------------------------------------------------
+-- Tab Bar (horizontal tabs with gold bottom indicator)
+---------------------------------------------------------------------------
+function lib:CreateTabBar(parent, tabs, opts)
+    opts = opts or {}
+    local TAB_H = opts.height or 26
+    local TAB_W = opts.tabWidth  -- nil = auto-size
+    local onChange = opts.onChange
+
+    local bar = CreateFrame("Frame", nil, parent)
+    bar:SetPoint("TOPLEFT", 0, 0)
+    bar:SetPoint("TOPRIGHT", 0, 0)
+    bar:SetHeight(TAB_H)
+
+    -- Bar background
+    local barBg = bar:CreateTexture(nil, "BACKGROUND")
+    barBg:SetAllPoints()
+    barBg:SetColorTexture(C.sidebarBg[1], C.sidebarBg[2], C.sidebarBg[3], 0.8)
+
+    -- Bottom separator
+    local barSep = bar:CreateTexture(nil, "ARTWORK")
+    barSep:SetPoint("BOTTOMLEFT", 0, 0)
+    barSep:SetPoint("BOTTOMRIGHT", 0, 0)
+    barSep:SetHeight(1)
+    barSep:SetColorTexture(C.divider[1], C.divider[2], C.divider[3], C.divider[4])
+
+    local tabBar = {
+        frame = bar,
+        contents = {},
+        _buttons = {},
+        _activeKey = nil,
+    }
+
+    -- Create content frames for each tab
+    for _, def in ipairs(tabs) do
+        local content = CreateFrame("Frame", nil, parent)
+        content:SetPoint("TOPLEFT", 0, -TAB_H)
+        content:SetPoint("BOTTOMRIGHT", 0, 0)
+        content:Hide()
+        tabBar.contents[def[1]] = content
+    end
+
+    -- Create tab buttons
+    local prevBtn = nil
+    for i, def in ipairs(tabs) do
+        local key, label = def[1], def[2]
+
+        local tab = CreateFrame("Button", nil, bar)
+        tab:SetSize(TAB_W or 80, TAB_H)
+        if prevBtn then
+            tab:SetPoint("LEFT", prevBtn, "RIGHT", 2, 0)
+        else
+            tab:SetPoint("TOPLEFT", 6, 0)
+        end
+
+        tab.bg = tab:CreateTexture(nil, "BACKGROUND")
+        tab.bg:SetAllPoints()
+        tab.bg:SetColorTexture(0, 0, 0, 0)
+
+        tab.indicator = tab:CreateTexture(nil, "OVERLAY")
+        tab.indicator:SetPoint("BOTTOMLEFT", 0, 0)
+        tab.indicator:SetPoint("BOTTOMRIGHT", 0, 0)
+        tab.indicator:SetHeight(2)
+        tab.indicator:SetColorTexture(0, 0, 0, 0)
+
+        tab.label = tab:CreateFontString(nil, "OVERLAY")
+        tab.label:SetFont(lib.FONT_BODY, 11, "")
+        tab.label:SetPoint("CENTER", 0, 1)
+        tab.label:SetText(label)
+        tab.label:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+        tab.key = key
+
+        -- Auto-size if no fixed width
+        if not TAB_W then
+            local resized = false
+            tab:SetScript("OnUpdate", function(self)
+                if resized then return end
+                local tw = tab.label:GetStringWidth()
+                if tw and tw > 0 then
+                    tab:SetWidth(math.max(60, tw + 24))
+                    resized = true
+                    tab:SetScript("OnUpdate", nil)
+                end
+            end)
+        end
+
+        tab:SetScript("OnEnter", function()
+            if tabBar._activeKey ~= key then
+                tab.bg:SetColorTexture(C.tabHover[1], C.tabHover[2], C.tabHover[3], C.tabHover[4])
+                tab.label:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+            end
+        end)
+        tab:SetScript("OnLeave", function()
+            if tabBar._activeKey ~= key then
+                tab.bg:SetColorTexture(0, 0, 0, 0)
+                tab.label:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+            end
+        end)
+        tab:SetScript("OnClick", function()
+            tabBar:SelectTab(key)
+        end)
+
+        tabBar._buttons[i] = tab
+        prevBtn = tab
+    end
+
+    function tabBar:SelectTab(key)
+        -- Update button visuals
+        for _, btn in ipairs(self._buttons) do
+            if btn.key == key then
+                btn.bg:SetColorTexture(C.tabActive[1], C.tabActive[2], C.tabActive[3], C.tabActive[4])
+                btn.indicator:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 1)
+                btn.label:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+            else
+                btn.bg:SetColorTexture(0, 0, 0, 0)
+                btn.indicator:SetColorTexture(0, 0, 0, 0)
+                btn.label:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+            end
+        end
+
+        -- Toggle content frames
+        for k, content in pairs(self.contents) do
+            if k == key then content:Show() else content:Hide() end
+        end
+
+        self._activeKey = key
+        if onChange then onChange(key, self.contents[key]) end
+    end
+
+    function tabBar:GetActive()
+        return self._activeKey
+    end
+
+    return tabBar
 end

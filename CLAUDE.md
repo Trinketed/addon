@@ -50,7 +50,15 @@ Each addon has isolated persistence: `TrinketedDB` (core), `TrinketedCDDB` (cool
 
 ### Submodules
 
-TrinketedCD and TrinketedHistory are git submodules with their own repos. When modifying them, changes must be committed in the submodule repo first, then the submodule reference updated in this parent repo.
+TrinketedCD and TrinketedHistory are git submodules with their own repos (`Trinketed/cd` and `Trinketed/history` on GitHub). All repos use `main` as the default branch.
+
+**Development workflow:** Edit files directly in the submodule directories (`TrinketedCD/` and `TrinketedHistory/`), commit and push from within them. The `~/bin/sync-trinketed.sh` script rsyncs all addon directories to the WoW AddOns folder for local testing.
+
+**Automated submodule updates:** Each submodule repo has a `notify-parent.yml` workflow that triggers the parent repo's `update-submodule.yml` on push to `main`. This automatically updates the submodule pointer, which then triggers auto-tag → release. No manual submodule pointer management is needed.
+
+**Pipeline:** Submodule push → `notify-parent.yml` → `update-submodule.yml` → `auto-tag.yml` → `release.yml`
+
+The `RELEASE_TOKEN` PAT is stored as an org-level secret on the Trinketed GitHub org.
 
 ## Key Files
 
