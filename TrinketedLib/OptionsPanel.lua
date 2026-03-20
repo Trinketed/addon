@@ -11,7 +11,7 @@ local contentArea = nil
 local sidebarButtons = {}
 local activeSubAddon = nil
 local SIDEBAR_W = 140
-local FRAME_W = 800
+local FRAME_W = 932
 local FRAME_H = 520
 
 ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ local function BuildMasterFrame()
     local verText = sidebar:CreateFontString(nil, "OVERLAY")
     verText:SetFont(lib.FONT_MONO, 9, "")
     verText:SetPoint("TOP", brandText, "BOTTOM", 0, -3)
-    verText:SetText(C_AddOns.GetAddOnMetadata("Trinketed", "Version") or "")
+    verText:SetText(lib:GetVersion())
     verText:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
 
     local brandSep = sidebar:CreateTexture(nil, "ARTWORK")
@@ -219,6 +219,10 @@ function lib:HideOptionsPanel()
     if masterFrame then
         masterFrame:Hide()
     end
+end
+
+function lib:IsOptionsPanelShown()
+    return masterFrame and masterFrame:IsShown()
 end
 
 function lib:GetContentWidth()
