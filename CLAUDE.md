@@ -30,8 +30,8 @@ There is no local build step. The BigWigsMods packager runs in CI to produce rel
 
 - **Constants:** Font paths (`lib.FONT_DISPLAY`, `lib.FONT_BODY`, `lib.FONT_MONO`), color palette (`lib.C`)
 - **Sub-addon registry:** `RegisterSubAddon(name, opts)`, `RegisterSubCommand(name, handler)`
-- **Widgets:** Toggle chips, sliders, buttons, section headers, micro-tooltips (`TrinketedLib/Widgets.lua`)
-- **Options panel:** Sidebar-tabbed settings frame built lazily on first open (`TrinketedLib/OptionsPanel.lua`)
+- **Widgets:** Toggle chips, sliders, buttons, section headers, tab bars, micro-tooltips (`TrinketedLib/Widgets.lua`)
+- **Options panel:** Fixed-size (932×520) sidebar-tabbed settings frame built lazily on first open (`TrinketedLib/OptionsPanel.lua`)
 
 ### Slash Command Dispatch
 
@@ -76,5 +76,7 @@ The `RELEASE_TOKEN` PAT is stored as an org-level secret on the Trinketed GitHub
 - **Color palette:** Always use `lib.C.*` colors from TrinketedLib rather than inline RGBA values
 - **Fonts:** Reference `lib.FONT_DISPLAY`, `lib.FONT_BODY`, `lib.FONT_MONO` — fonts live in `Fonts/`
 - **UI construction:** Use widget constructors from `Widgets.lua` for consistent styling
+- **Inner tabs:** Sub-addons use `lib:CreateTabBar(parent, tabs, opts)` for horizontal top tabs within their options content area — not custom sidebar tab code
+- **Panel size:** All sub-addons share the same fixed-size options panel (932×520). Do not use `contentWidth` to resize per tab — design content to fit the 780px content area (`lib:GetContentWidth()`) so switching tabs is not visually jarring
 - **Gold accent color:** The brand color is `lib.C.accent` (gold: 0.91, 0.73, 0.14), used in chat output as `|cffE8B923`
 - **WoW API color strings:** Use `|cff` hex format for chat print coloring (e.g., `|cffE8B923Trinketed|r`)

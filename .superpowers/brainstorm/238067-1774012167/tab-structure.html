@@ -1,0 +1,119 @@
+<h2>Tab Structure</h2>
+<p class="subtitle">How should the TrinketedCD options panel be organized?</p>
+
+<div class="cards">
+  <!-- Option A -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family: monospace; font-size: 12px; padding: 12px; background: #1a1a2e; border-radius: 6px;">
+        <div style="display: flex; gap: 0; height: 220px;">
+          <!-- Sidebar -->
+          <div style="width: 80px; background: #16213e; border-right: 1px solid #333; padding: 8px 0;">
+            <div style="padding: 4px 8px; font-size: 10px; color: #666; margin-bottom: 4px;">CD v0.1</div>
+            <div style="padding: 6px 8px; background: #1a1a3e; border-left: 2px solid #e8b923; color: #fff; font-size: 11px;">Settings</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Spells</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Test</div>
+          </div>
+          <!-- Content -->
+          <div style="flex: 1; padding: 10px; overflow: hidden;">
+            <!-- Inner tabs -->
+            <div style="display: flex; gap: 0; border-bottom: 1px solid #333; margin-bottom: 8px;">
+              <div style="padding: 4px 12px; color: #fff; border-bottom: 2px solid #e8b923; font-size: 10px;">Settings</div>
+              <div style="padding: 4px 12px; color: #666; font-size: 10px;">Spells</div>
+            </div>
+            <div style="color: #888; font-size: 9px; line-height: 1.6;">
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin-bottom: 4px;">DISPLAY</div>
+              <div>[ ] Glow on expire &nbsp; [ ] Flash on use</div>
+              <div>[ ] Pulse border &nbsp;&nbsp; [ ] Name labels</div>
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin: 6px 0 4px;">ANCHORING</div>
+              <div>[ ] Anchor to frames</div>
+              <div>Side: [Left] [Right]</div>
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin: 6px 0 4px;">ACTIONS</div>
+              <div>[x] Bars locked &nbsp; [Reset]</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A: Inner Sub-tabs</h3>
+      <p>3 sidebar tabs (Settings, Spells, Test) with Settings having inner "Settings" / "Spells" sub-tabs. Familiar pattern, but "Spells" appears in two places.</p>
+    </div>
+  </div>
+
+  <!-- Option B -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family: monospace; font-size: 12px; padding: 12px; background: #1a1a2e; border-radius: 6px;">
+        <div style="display: flex; gap: 0; height: 220px;">
+          <!-- Sidebar -->
+          <div style="width: 80px; background: #16213e; border-right: 1px solid #333; padding: 8px 0;">
+            <div style="padding: 4px 8px; font-size: 10px; color: #666; margin-bottom: 4px;">CD v0.1</div>
+            <div style="padding: 6px 8px; background: #1a1a3e; border-left: 2px solid #e8b923; color: #fff; font-size: 11px;">Settings</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Spells</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Test</div>
+          </div>
+          <!-- Content -->
+          <div style="flex: 1; padding: 10px; overflow: hidden;">
+            <div style="color: #888; font-size: 9px; line-height: 1.6;">
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin-bottom: 4px;">DISPLAY</div>
+              <div>[ ] Glow on expire &nbsp; [ ] Flash on use</div>
+              <div>[ ] Pulse border &nbsp;&nbsp; [ ] Name labels</div>
+              <div>[ ] Compact mode &nbsp;&nbsp; [ ] Icon borders</div>
+              <div>[ ] Tooltips &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [ ] Track outside</div>
+              <div>Glow color: [__] &nbsp; Icon size: [==o==]</div>
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin: 6px 0 4px;">ANCHORING</div>
+              <div>[ ] Anchor to frames</div>
+              <div>Side: [Left] [Right]</div>
+              <div>Offset X: [===o===] Y: [===o===]</div>
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin: 6px 0 4px;">ACTIONS</div>
+              <div>[x] Locked &nbsp; [x] Tracking on</div>
+              <div>[Reset Pos] [Import] [Export]</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B: Flat Sidebar</h3>
+      <p>3 sidebar tabs (Settings, Spells, Test). No inner tabs at all. All settings in one scrollable page with section headers. Cleanest hierarchy.</p>
+    </div>
+  </div>
+
+  <!-- Option C -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family: monospace; font-size: 12px; padding: 12px; background: #1a1a2e; border-radius: 6px;">
+        <div style="display: flex; gap: 0; height: 220px;">
+          <!-- Sidebar -->
+          <div style="width: 80px; background: #16213e; border-right: 1px solid #333; padding: 8px 0;">
+            <div style="padding: 4px 8px; font-size: 10px; color: #666; margin-bottom: 4px;">CD v0.1</div>
+            <div style="padding: 6px 8px; background: #1a1a3e; border-left: 2px solid #e8b923; color: #fff; font-size: 11px;">Display</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Position</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Spells</div>
+            <div style="padding: 6px 8px; color: #888; font-size: 11px;">Test</div>
+          </div>
+          <!-- Content -->
+          <div style="flex: 1; padding: 10px; overflow: hidden;">
+            <div style="color: #888; font-size: 9px; line-height: 1.6;">
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin-bottom: 4px;">VISUAL EFFECTS</div>
+              <div>[ ] Glow on expire &nbsp; [ ] Flash on use</div>
+              <div>[ ] Pulse border &nbsp;&nbsp; [ ] Name labels</div>
+              <div>[ ] Compact mode &nbsp;&nbsp; [ ] Icon borders</div>
+              <div>[ ] Tooltips &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Glow color: [__]</div>
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin: 6px 0 4px;">SIZING</div>
+              <div>Icon size: [======o======]</div>
+              <div style="color: #e8b923; font-size: 8px; letter-spacing: 1px; margin: 6px 0 4px;">GENERAL</div>
+              <div>[x] Tracking on &nbsp; [x] Track outside</div>
+              <div>[x] Bars locked &nbsp; [ ] Debug output</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C: Split by Concern</h3>
+      <p>4 sidebar tabs (Display, Position, Spells, Test). Groups settings by what they control. More tabs but each is focused and short.</p>
+    </div>
+  </div>
+</div>

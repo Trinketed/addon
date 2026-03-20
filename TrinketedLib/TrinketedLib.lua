@@ -58,6 +58,15 @@ lib.C = {
 }
 
 ---------------------------------------------------------------------------
+-- Version Helper
+---------------------------------------------------------------------------
+function lib:GetVersion(addonName)
+    local v = C_AddOns.GetAddOnMetadata(addonName or "Trinketed", "Version")
+    if not v or v:find("^@") then return "dev" end
+    return v
+end
+
+---------------------------------------------------------------------------
 -- Sub-Addon Registry
 ---------------------------------------------------------------------------
 lib.subAddons = lib.subAddons or {}
