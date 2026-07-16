@@ -18,3 +18,7 @@ Thumbs.db
 
 # Agent/editor local
 .claude/
+
+# Packager build output
+.release/
+release.sh
