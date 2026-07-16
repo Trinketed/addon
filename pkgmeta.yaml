@@ -20,3 +20,4 @@ ignore:
   - .claude
   - "*.md"
   - .gitignore
+  - TrinketedLOS

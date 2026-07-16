@@ -1,0 +1,11 @@
+## Interface: 110207
+## Title: Trinketed - Line of Sight
+## Notes: Relays "target not in line of sight" errors to allies running the addon so they can reposition
+## Author: apwek
+## Version: @project-version@
+## Dependencies: Trinketed
+## SavedVariables: TrinketedLOSDB
+
+Core.lua
+Display.lua
+Options.lua
