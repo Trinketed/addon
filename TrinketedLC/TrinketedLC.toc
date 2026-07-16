@@ -1,0 +1,12 @@
+## Interface: 110207
+## Title: Trinketed - Lose Control
+## Notes: Loss-of-control aura swipe over unit frames (CC, silence, root, disarm, interrupts)
+## Author: apwek
+## Version: @project-version@
+## Dependencies: Trinketed
+## SavedVariables: TrinketedLCDB
+
+Data.lua
+Core.lua
+Display.lua
+Options.lua

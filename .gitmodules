@@ -1,6 +1,0 @@
-[submodule "TrinketedCD"]
-	path = TrinketedCD
-	url = git@github.com:Trinketed/cd.git
-[submodule "TrinketedHistory"]
-	path = TrinketedHistory
-	url = git@github.com:Trinketed/history.git

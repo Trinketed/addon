@@ -1,0 +1,15 @@
+## Interface: 110207
+## Title: Trinketed - Cooldowns
+## Notes: Arena cooldown tracker
+## Author: apwek
+## Version: @project-version@
+## Dependencies: Trinketed
+## SavedVariables: TrinketedCDDB
+
+CooldownData.lua
+Core.lua
+Serialize.lua
+Tracker.lua
+Display.lua
+TestMode.lua
+Options.lua

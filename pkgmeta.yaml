@@ -9,11 +9,14 @@ externals:
 move-folders:
   Trinketed/TrinketedCD: TrinketedCD
   Trinketed/TrinketedHistory: TrinketedHistory
+  Trinketed/TrinketedAuras: TrinketedAuras
+  Trinketed/TrinketedLC: TrinketedLC
 
 ignore:
   - .github
   - docs
+  - tools
+  - addons.json
+  - .claude
   - "*.md"
   - .gitignore
-  - .gitmodules
-  - pkgmeta.yaml

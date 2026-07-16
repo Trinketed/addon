@@ -61,7 +61,7 @@ lib:RegisterSubAddon("Welcome", {
         histDesc:SetPoint("TOPLEFT", histTitle, "BOTTOMLEFT", 0, -2)
         histDesc:SetWidth(lib:GetContentWidth() - 64)
         histDesc:SetJustifyH("LEFT")
-        histDesc:SetText("Match history and session breakdown with rating tracking, team stats, and data export.")
+        histDesc:SetText("Match history and session breakdown with rating tracking and team stats.")
         histDesc:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
     end,
 })
