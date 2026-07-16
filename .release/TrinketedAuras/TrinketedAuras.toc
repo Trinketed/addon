@@ -1,0 +1,11 @@
+## Interface: 110207
+## Title: Trinketed - Auras
+## Notes: Personal buff/debuff tracker: configurable icon groups with duration, stacks and swipe
+## Author: apwek
+## Version: v0.1.19-3-ga96ff41
+## Dependencies: Trinketed
+## SavedVariables: TrinketedAurasDB
+
+Core.lua
+Display.lua
+Options.lua

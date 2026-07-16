@@ -1180,6 +1180,10 @@ local function InitMatch()
         ratingBefore = nil,
         ratingAfter = nil,
         ratingChange = nil,
+        mmrBefore = nil,
+        mmrAfter = nil,
+        mmrChange = nil,
+        enemyMMR = nil,
         roster = {},
         events = {},
     }
@@ -1269,19 +1273,49 @@ local function SaveMatch(result)
         end
     end
 
-    -- Per-player rating changes from scoreboard
+    -- MMR from scoreboard (captured independently of how rating was obtained).
+    -- Legacy column order: ...rating(12) ratingChange(13) preMatchMMR(14) mmrChange(15)
+    if GetBattlefieldScore and GetNumBattlefieldScores then
+        local playerName = StripRealm(UnitName("player"))
+        local numScores = GetNumBattlefieldScores() or 0
+        for si = 1, numScores do
+            local name, _, _, _, _, _, _, _, _, _, _, _, _, preMatchMMR, mmrChange = GetBattlefieldScore(si)
+            if name and StripRealm(name) == playerName and preMatchMMR and preMatchMMR > 0 then
+                currentMatch.mmrBefore = math.floor(preMatchMMR + 0.5)
+                currentMatch.mmrChange = math.floor((mmrChange or 0) + 0.5)
+                currentMatch.mmrAfter = currentMatch.mmrBefore + currentMatch.mmrChange
+                dbg("  MMR (scoreboard):", currentMatch.mmrBefore, "change:", currentMatch.mmrChange)
+                break
+            end
+        end
+    end
+
+    -- Per-player rating + MMR from scoreboard.
+    -- Legacy column order: ...rating(12) ratingChange(13) preMatchMMR(14) mmrChange(15)
     if GetBattlefieldScore and GetNumBattlefieldScores then
         local numScores = GetNumBattlefieldScores() or 0
         for si = 1, numScores do
-            local name, _, _, _, _, _, _, _, _, _, _, _, ratingChange = GetBattlefieldScore(si)
+            local name, _, _, _, _, _, _, _, _, _, _, _, ratingChange, preMatchMMR, mmrChange = GetBattlefieldScore(si)
             if name then
                 local cleanName = StripRealm(name)
                 for guid, entry in pairs(currentMatch.roster) do
                     if entry.name == cleanName then
                         entry.ratingChange = ratingChange
+                        if preMatchMMR and preMatchMMR > 0 then
+                            entry.mmr = math.floor(preMatchMMR + 0.5)
+                            entry.mmrChange = math.floor((mmrChange or 0) + 0.5)
+                        end
                     end
                 end
             end
+        end
+    end
+
+    -- Derive enemy team MMR from any enemy roster entry that has one
+    for guid, entry in pairs(currentMatch.roster) do
+        if entry.team == "enemy" and entry.mmr and entry.mmr > 0 then
+            currentMatch.enemyMMR = entry.mmr
+            break
         end
     end
 
@@ -1304,6 +1338,8 @@ local function SaveMatch(result)
             race = entry.race,
             spec = entry.spec,
             ratingChange = entry.ratingChange,
+            mmr = entry.mmr,
+            mmrChange = entry.mmrChange,
         }
         if entry.team == "friendly" then
             table.insert(friendlyTeam, p)
@@ -1343,6 +1379,10 @@ local function SaveMatch(result)
         ratingBefore = currentMatch.ratingBefore,
         ratingAfter = currentMatch.ratingAfter,
         ratingChange = currentMatch.ratingChange,
+        mmrBefore = currentMatch.mmrBefore,
+        mmrAfter = currentMatch.mmrAfter,
+        mmrChange = currentMatch.mmrChange,
+        enemyMMR = currentMatch.enemyMMR,
         eventLog = compressedEventLog,
     })
 
@@ -1362,7 +1402,13 @@ local function SaveMatch(result)
         ratingStr = " " .. color .. "(" .. sign .. currentMatch.ratingChange .. " rating, " ..
             (currentMatch.ratingBefore or "?") .. "→" .. (currentMatch.ratingAfter or "?") .. ")|r"
     end
-    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. ratingStr ..
+    local mmrStr = ""
+    if currentMatch.mmrBefore then
+        mmrStr = " |cff888888[MMR " .. currentMatch.mmrBefore ..
+            (currentMatch.mmrChange and currentMatch.mmrChange ~= 0
+                and string.format(" (%+d)", currentMatch.mmrChange) or "") .. "]|r"
+    end
+    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. ratingStr .. mmrStr ..
         " | " .. eventCount .. " events | " .. string.format("%.1fs", currentMatch.duration))
 
     needsReload = true
@@ -1382,6 +1428,7 @@ local filters = {
     enemyRaces = {},      -- table of race = true for selected enemy races (empty = all)
     maps = {},            -- table of map name = true for selected arenas (empty = all)
     result = nil,
+    bracket = "All",      -- "All" | "2v2" | "3v3" | "5v5"
     season = currentSeason,
 }
 
@@ -1534,6 +1581,17 @@ local function ComputeSessions(games, bracketFilter, daysFilter, mapsFilter, sea
             s.ratingChange = totalRatingChange
         end
 
+        -- MMR endpoints: first/last games in the session that recorded MMR
+        for _, g in ipairs(s.games) do
+            if g.mmrBefore then s.mmrStart = g.mmrBefore; break end
+        end
+        for i = #s.games, 1, -1 do
+            if s.games[i].mmrAfter then s.mmrEnd = s.games[i].mmrAfter; break end
+        end
+        if s.mmrStart and s.mmrEnd then
+            s.mmrChange = s.mmrEnd - s.mmrStart
+        end
+
         -- Collect unique partners (friendly team members excluding self)
         local seen = {}
         local partners = {}
@@ -1610,6 +1668,65 @@ local function ComputeTeams(games, bracketFilter, seasonFilter)
     return teams
 end
 
+---------------------------------------------------------------------------
+-- ComputeEnemies: aggregate lifetime W/L and net rating vs each enemy player.
+-- Each game contributes its rating change once to every distinct opponent that
+-- appeared on the enemy team — so "Net" is the cumulative points you've gained
+-- or lost across all matches you played against that player.
+---------------------------------------------------------------------------
+local function ComputeEnemies(games, bracketFilter, seasonFilter)
+    if not games or #games == 0 then return {} end
+
+    local enemyMap = {} -- key = enemy player name
+
+    for _, g in ipairs(games) do
+        local bracketOk = not bracketFilter or g.bracket == bracketFilter
+        local seasonOk = not seasonFilter or (g.season or 1) == seasonFilter
+        if bracketOk and seasonOk then
+            local seen = {}
+            for _, p in ipairs(g.enemyTeam or {}) do
+                local name = p.name
+                if name and not seen[name] then
+                    seen[name] = true
+                    local e = enemyMap[name]
+                    if not e then
+                        e = { name = name, class = p.class, race = p.race,
+                              wins = 0, losses = 0, netRating = 0, totalGames = 0 }
+                        enemyMap[name] = e
+                    end
+                    if p.class then e.class = p.class end
+                    e.totalGames = e.totalGames + 1
+                    if g.result == "WIN" then
+                        e.wins = e.wins + 1
+                    elseif g.result == "LOSS" then
+                        e.losses = e.losses + 1
+                    end
+                    -- Gain/loss is rating-based: prefer the actual before→after
+                    -- delta, fall back to the stored ratingChange.
+                    local delta
+                    if g.ratingBefore and g.ratingAfter then
+                        delta = g.ratingAfter - g.ratingBefore
+                    else
+                        delta = g.ratingChange or 0
+                    end
+                    e.netRating = e.netRating + delta
+                end
+            end
+        end
+    end
+
+    local enemies = {}
+    for _, e in pairs(enemyMap) do
+        table.insert(enemies, e)
+    end
+    table.sort(enemies, function(a, b)
+        if a.totalGames ~= b.totalGames then return a.totalGames > b.totalGames end
+        return a.wins > b.wins
+    end)
+
+    return enemies
+end
+
 local function GameMatchesFilters(game)
     if filters.result and game.result ~= filters.result then
         return false
@@ -1651,6 +1768,10 @@ local function GameMatchesFilters(game)
     -- Map filter (multi-select)
     if next(filters.maps) then
         if not game.map or not filters.maps[game.map] then return false end
+    end
+    -- Bracket filter (single-select)
+    if filters.bracket and filters.bracket ~= "All" and game.bracket ~= filters.bracket then
+        return false
     end
     -- Season filter (single-select)
     if filters.season and (game.season or 1) ~= filters.season then
@@ -1791,6 +1912,7 @@ local activeTab = "matches" -- "matches", "sessions", "teams", or "settings"
 local RefreshHistory
 local RefreshSessions
 local RefreshTeams
+local RefreshEnemies
 
 -- RefreshActiveTab is called from the contentFrame:OnShow hook (set in OnSelect)
 local function RefreshActiveTab()
@@ -1798,6 +1920,8 @@ local function RefreshActiveTab()
         if RefreshSessions then RefreshSessions() end
     elseif activeTab == "teams" then
         if RefreshTeams then RefreshTeams() end
+    elseif activeTab == "enemies" then
+        if RefreshEnemies then RefreshEnemies() end
     elseif activeTab == "matches" then
         if RefreshHistory then RefreshHistory() end
     end
@@ -1811,6 +1935,7 @@ local historyTabBar = lib:CreateTabBar(tabContainer, {
     { "matches", "Matches" },
     { "sessions", "Sessions" },
     { "teams", "Teams" },
+    { "enemies", "Enemies" },
     { "settings", "Settings" },
 }, {
     height = 26,
@@ -1823,6 +1948,8 @@ local historyTabBar = lib:CreateTabBar(tabContainer, {
             if RefreshSessions then RefreshSessions() end
         elseif key == "teams" then
             if RefreshTeams then RefreshTeams() end
+        elseif key == "enemies" then
+            if RefreshEnemies then RefreshEnemies() end
         end
     end,
 })
@@ -1832,6 +1959,7 @@ local historyTabBar = lib:CreateTabBar(tabContainer, {
 local matchesContainer = historyTabBar.contents["matches"]
 local sessionsContainer = historyTabBar.contents["sessions"]
 local teamsContainer = historyTabBar.contents["teams"]
+local enemiesContainer = historyTabBar.contents["enemies"]
 local settingsContainer = historyTabBar.contents["settings"]
 
 historyTabBar:SelectTab("matches")
@@ -2155,6 +2283,36 @@ local enemyCompDD = CreateSearchableDropdown(matchesContainer, "TkECompDD", 155,
 })
 enemyCompDD.frame:SetPoint("TOPLEFT", 342, -10)
 
+local bracketDD = CreateSearchableDropdown(matchesContainer, "TkBracketDD", 120, {
+    defaultLabel = "Bracket: All",
+    getOptions = function()
+        local out = {}
+        for _, b in ipairs({ "2v2", "3v3", "5v5" }) do
+            table.insert(out, {
+                key = b,
+                text = b,
+                searchText = b:lower(),
+                isChecked = function() return filters.bracket == b end,
+            })
+        end
+        return out
+    end,
+    onToggle = function(key)
+        if filters.bracket == key then
+            filters.bracket = "All"
+        else
+            filters.bracket = key
+        end
+        RefreshHistory()
+    end,
+    onClear = function() filters.bracket = "All"; RefreshHistory() end,
+    getLabel = function()
+        if filters.bracket == "All" then return "Bracket: All" end
+        return "Bracket: " .. filters.bracket
+    end,
+})
+bracketDD.frame:SetPoint("TOPLEFT", 502, -10)
+
 ---------------------------------------------------------------------------
 -- Filter Row 2: Enemy Players | Enemy Race | Result | Reset
 ---------------------------------------------------------------------------
@@ -2335,10 +2493,12 @@ resetBtn:SetScript("OnClick", function()
     filters.enemyRaces = {}
     filters.maps = {}
     filters.result = nil
+    filters.bracket = "All"
     filters.season = currentSeason
     friendlyCompDD:SetLabel("Player Comp: All")
     partnerDD:SetLabel("Partner: All")
     enemyCompDD:SetLabel("Enemy Comp: All")
+    bracketDD:SetLabel("Bracket: All")
     enemyPlayerDD:SetLabel("Enemy Players: All")
     enemyRaceDD:SetLabel("Race: All")
     resultDD:SetLabel("Result: All")
@@ -2347,19 +2507,33 @@ resetBtn:SetScript("OnClick", function()
     RefreshHistory()
 end)
 
+-- Show the Reset button only when at least one filter differs from the default
+-- (default = no comp/partner/etc. filters, and the current season).
+local function UpdateResetButton()
+    local active =
+        next(filters.friendlyComps) or next(filters.partners) or
+        next(filters.enemyComps) or next(filters.enemyPlayers) or
+        next(filters.enemyRaces) or next(filters.maps) or
+        filters.result ~= nil or filters.bracket ~= "All" or
+        filters.season ~= currentSeason
+    resetBtn:SetShown(active and true or false)
+end
+UpdateResetButton()
+
 -- Column headers
 local headerY = -66
 local headers = {
-    { text = "#",        x = 4,   w = 20, justify = "RIGHT" },
-    { text = "Result",   x = 26,  w = 32, justify = "LEFT" },
-    { text = "Friendly", x = 58,  w = 170, justify = "LEFT" },
-    { text = "",         x = 230, w = 14, justify = "CENTER" },  -- vs column (no header)
-    { text = "Enemy",    x = 246, w = 170, justify = "LEFT" },
-    { text = "Rating",   x = 420, w = 90, justify = "CENTER" },
-    { text = "Dur",      x = 514, w = 36, justify = "LEFT" },
-    { text = "Time",     x = 554, w = 95, justify = "RIGHT" },
-    { text = "Map",      x = 652, w = 34, justify = "CENTER" },
-    { text = "",         x = 688, w = 55, justify = "CENTER" },
+    { text = "#",        x = 4,   w = 18, justify = "RIGHT" },
+    { text = "Result",   x = 24,  w = 28, justify = "LEFT" },
+    { text = "Friendly", x = 54,  w = 146, justify = "LEFT" },
+    { text = "",         x = 200, w = 12, justify = "CENTER" },  -- vs column (no header)
+    { text = "Enemy",    x = 214, w = 146, justify = "LEFT" },
+    { text = "Rating",   x = 362, w = 76, justify = "CENTER" },
+    { text = "MMR",      x = 440, w = 92, justify = "CENTER" },
+    { text = "Dur",      x = 534, w = 28, justify = "LEFT" },
+    { text = "Time",     x = 562, w = 86, justify = "RIGHT" },
+    { text = "Map",      x = 650, w = 30, justify = "CENTER" },
+    { text = "",         x = 686, w = 50, justify = "CENTER" },
 }
 for _, h in ipairs(headers) do
     if h.text ~= "" then
@@ -2614,6 +2788,17 @@ local function FormatRatingChange(game)
     return color .. sign .. game.ratingChange .. "|r"
 end
 
+-- Player MMR, colored by mmrChange; em-dash when absent.
+-- (Opponent MMR is stored in game.enemyMMR but not shown here.)
+local function FormatMMR(game)
+    if not game.mmrBefore then return "|cff555555—|r" end
+    local color = "|cffaaaaaa"
+    if game.mmrChange and game.mmrChange ~= 0 then
+        color = game.mmrChange > 0 and "|cff00ff00" or "|cffff0000"
+    end
+    return color .. game.mmrBefore .. "|r"
+end
+
 -- Enemy team display: prefer FormatTeamNames, fall back to class-only from enemyComp
 local function FormatEnemyTeam(game)
     local enemyStr = FormatTeamNames(game.enemyTeam)
@@ -2626,13 +2811,202 @@ local function FormatEnemyTeam(game)
 end
 
 local rowPool = {}
+-- Virtualized Matches list: with thousands of games we can't create a frame per
+-- game (that's what made scrolling lag). Instead we keep a small pool sized to
+-- the viewport and recycle rows as the list scrolls — same approach as the
+-- replay combat feed. State/methods live on one table to keep top-level locals down.
+local historyView = { filtered = nil }
 
-function RefreshHistory()
-    -- Recycle existing rows
-    for _, row in ipairs(rowPool) do
-        row:Hide()
+-- Create one pooled Matches row. The replay button reads row.game (set by
+-- :Populate) rather than capturing a game, so rows recycle correctly on scroll.
+function historyView:MakeRow()
+    local row = CreateFrame("Button", nil, content)
+    row:SetSize(740, ROW_HEIGHT)
+
+    row.index = row:CreateFontString(nil, "OVERLAY")
+    row.index:SetFont(lib.FONT_BODY, 10, "")
+    row.index:SetPoint("LEFT", 4, 0)
+    row.index:SetWidth(18)
+    row.index:SetJustifyH("RIGHT")
+
+    row.result = row:CreateFontString(nil, "OVERLAY")
+    row.result:SetFont(lib.FONT_BODY, 10, "")
+    row.result:SetPoint("LEFT", 24, 0)
+    row.result:SetWidth(28)
+
+    row.friendly = row:CreateFontString(nil, "OVERLAY")
+    row.friendly:SetFont(lib.FONT_BODY, 10, "")
+    row.friendly:SetPoint("LEFT", 54, 0)
+    row.friendly:SetWidth(146)
+    row.friendly:SetJustifyH("LEFT")
+    row.friendly:SetMaxLines(2)
+    row.friendly:SetNonSpaceWrap(false)
+    row.friendly:SetWordWrap(true)
+
+    row.vs = row:CreateFontString(nil, "OVERLAY")
+    row.vs:SetFont(lib.FONT_BODY, 10, "")
+    row.vs:SetPoint("LEFT", 200, 0)
+    row.vs:SetWidth(12)
+    row.vs:SetJustifyH("CENTER")
+    row.vs:SetTextColor(C.textMuted[1], C.textMuted[2], C.textMuted[3])
+
+    row.enemy = row:CreateFontString(nil, "OVERLAY")
+    row.enemy:SetFont(lib.FONT_BODY, 10, "")
+    row.enemy:SetPoint("LEFT", 214, 0)
+    row.enemy:SetWidth(146)
+    row.enemy:SetJustifyH("LEFT")
+    row.enemy:SetMaxLines(2)
+    row.enemy:SetNonSpaceWrap(false)
+    row.enemy:SetWordWrap(true)
+
+    row.rating = row:CreateFontString(nil, "OVERLAY")
+    row.rating:SetFont(lib.FONT_BODY, 10, "")
+    row.rating:SetPoint("LEFT", 362, 0)
+    row.rating:SetWidth(76)
+    row.rating:SetJustifyH("CENTER")
+
+    row.mmr = row:CreateFontString(nil, "OVERLAY")
+    row.mmr:SetFont(lib.FONT_BODY, 10, "")
+    row.mmr:SetPoint("LEFT", 440, 0)
+    row.mmr:SetWidth(92)
+    row.mmr:SetJustifyH("CENTER")
+    row.mmr:SetWordWrap(false)
+
+    row.duration = row:CreateFontString(nil, "OVERLAY")
+    row.duration:SetFont(lib.FONT_BODY, 10, "")
+    row.duration:SetPoint("LEFT", 534, 0)
+    row.duration:SetWidth(28)
+    row.duration:SetJustifyH("CENTER")
+
+    row.timeStr = row:CreateFontString(nil, "OVERLAY")
+    row.timeStr:SetFont(lib.FONT_BODY, 10, "")
+    row.timeStr:SetPoint("LEFT", 562, 0)
+    row.timeStr:SetWidth(86)
+    row.timeStr:SetJustifyH("RIGHT")
+
+    row.mapStr = row:CreateFontString(nil, "OVERLAY")
+    row.mapStr:SetFont(lib.FONT_BODY, 10, "")
+    row.mapStr:SetPoint("LEFT", 650, 0)
+    row.mapStr:SetWidth(30)
+    row.mapStr:SetJustifyH("CENTER")
+    row.mapStr:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+    row.replayBtn = CreateFrame("Button", nil, row)
+    row.replayBtn:SetSize(50, 18)
+    row.replayBtn:SetPoint("LEFT", 686, 0)
+    row.replayBtn.bg = row.replayBtn:CreateTexture(nil, "BACKGROUND")
+    row.replayBtn.bg:SetAllPoints()
+    row.replayBtn.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
+    row.replayBtn.bdr = row.replayBtn:CreateTexture(nil, "BORDER")
+    row.replayBtn.bdr:SetPoint("TOPLEFT"); row.replayBtn.bdr:SetPoint("BOTTOMRIGHT")
+    row.replayBtn.bdr:SetColorTexture(0, 0, 0, 0)
+    row.replayBtn.icon = row.replayBtn:CreateFontString(nil, "OVERLAY")
+    row.replayBtn.icon:SetFont(lib.FONT_BODY, 9, "")
+    row.replayBtn.icon:SetPoint("CENTER")
+    row.replayBtn.icon:SetText("Replay >")
+    row.replayBtn.icon:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    row.replayBtn:SetScript("OnEnter", function(self)
+        self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.3)
+        self.icon:SetTextColor(1, 1, 1)
+    end)
+    row.replayBtn:SetScript("OnLeave", function(self)
+        self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
+        self.icon:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    end)
+    row.replayBtn:SetScript("OnClick", function()
+        if row.game and row.game.eventLog then
+            lib:HideOptionsPanel()
+            addon:OpenReplay(row.game)
+        end
+    end)
+
+    -- Alternating background
+    row.bg = row:CreateTexture(nil, "BACKGROUND")
+    row.bg:SetAllPoints()
+
+    -- Hover highlight
+    local hl = row:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+
+    return row
+end
+
+-- Fill a pooled row with one game's data (i = original DB index, for the # label).
+function historyView:Populate(row, i, game)
+    row.game = game
+
+    row.index:SetText("#" .. i)
+    row.index:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+    if game.result == "WIN" then
+        row.result:SetText("|cff00ff00WIN|r")
+    else
+        row.result:SetText("|cffff0000LOSS|r")
     end
 
+    -- Friendly team — show class-colored names
+    local friendlyStr = FormatTeamNames(game.friendlyTeam)
+    row.friendly:SetText(friendlyStr or "—")
+
+    row.vs:SetText("vs")
+
+    row.enemy:SetText(FormatEnemyTeam(game))
+    row.rating:SetText(FormatRatingChange(game))
+    row.mmr:SetText(FormatMMR(game))
+
+    local dur = (game.startTime and game.endTime) and (game.endTime - game.startTime) or nil
+    row.duration:SetText(FormatDuration(dur))
+    row.duration:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+
+    row.timeStr:SetText(FormatTime(game.startTime))
+    row.mapStr:SetText(AbbrevMap(game.map))
+    row.timeStr:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+    if game.eventLog then
+        row.replayBtn:Show()
+    else
+        row.replayBtn:Hide()
+    end
+end
+
+-- Render only the rows visible in the scroll viewport, recycling the pool.
+function historyView:Render()
+    local filtered = self.filtered
+    if not filtered then return end
+    local viewH = scrollFrame:GetHeight()
+    if not viewH or viewH <= 0 then viewH = 360 end
+    local scroll = scrollFrame:GetVerticalScroll() or 0
+    local poolNeeded = math.ceil(viewH / ROW_HEIGHT) + 2
+    local first = math.max(1, math.floor(scroll / ROW_HEIGHT) + 1)
+
+    for slot = 1, poolNeeded do
+        local displayIdx = first + slot - 1
+        local entry = filtered[displayIdx]
+        local row = rowPool[slot]
+        if entry then
+            if not row then
+                row = self:MakeRow()
+                rowPool[slot] = row
+            end
+            row:SetPoint("TOPLEFT", 0, -((displayIdx - 1) * ROW_HEIGHT))
+            if displayIdx % 2 == 0 then
+                row.bg:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+            else
+                row.bg:SetColorTexture(0, 0, 0, 0)
+            end
+            self:Populate(row, entry.idx, entry.game)
+            row:Show()
+        elseif row then
+            row:Hide()
+        end
+    end
+end
+
+-- Re-render the window whenever the user scrolls the Matches list.
+scrollFrame:HookScript("OnVerticalScroll", function() historyView:Render() end)
+
+function RefreshHistory()
     local allGames = TrinketedHistoryDB and TrinketedHistoryDB.games or {}
 
     -- Apply filters — build list of {originalIndex, game} pairs, newest first
@@ -2642,171 +3016,22 @@ function RefreshHistory()
             table.insert(filtered, { idx = i, game = allGames[i] })
         end
     end
+    historyView.filtered = filtered
 
-    local totalHeight = 0
-
-    for displayIdx = 1, #filtered do
-        local i = filtered[displayIdx].idx
-        local game = filtered[displayIdx].game
-
-        local row = rowPool[displayIdx]
-        if not row then
-            row = CreateFrame("Button", nil, content)
-            row:SetSize(740, ROW_HEIGHT)
-            rowPool[displayIdx] = row
-
-            row.index = row:CreateFontString(nil, "OVERLAY")
-            row.index:SetFont(lib.FONT_BODY, 10, "")
-            row.index:SetPoint("LEFT", 4, 0)
-            row.index:SetWidth(20)
-            row.index:SetJustifyH("RIGHT")
-
-            row.result = row:CreateFontString(nil, "OVERLAY")
-            row.result:SetFont(lib.FONT_BODY, 10, "")
-            row.result:SetPoint("LEFT", 26, 0)
-            row.result:SetWidth(32)
-
-            row.friendly = row:CreateFontString(nil, "OVERLAY")
-            row.friendly:SetFont(lib.FONT_BODY, 10, "")
-            row.friendly:SetPoint("LEFT", 58, 0)
-            row.friendly:SetWidth(170)
-            row.friendly:SetJustifyH("LEFT")
-            row.friendly:SetMaxLines(2)
-            row.friendly:SetNonSpaceWrap(false)
-            row.friendly:SetWordWrap(true)
-
-            row.vs = row:CreateFontString(nil, "OVERLAY")
-            row.vs:SetFont(lib.FONT_BODY, 10, "")
-            row.vs:SetPoint("LEFT", 230, 0)
-            row.vs:SetWidth(14)
-            row.vs:SetJustifyH("CENTER")
-            row.vs:SetTextColor(C.textMuted[1], C.textMuted[2], C.textMuted[3])
-
-            row.enemy = row:CreateFontString(nil, "OVERLAY")
-            row.enemy:SetFont(lib.FONT_BODY, 10, "")
-            row.enemy:SetPoint("LEFT", 246, 0)
-            row.enemy:SetWidth(170)
-            row.enemy:SetJustifyH("LEFT")
-            row.enemy:SetMaxLines(2)
-            row.enemy:SetNonSpaceWrap(false)
-            row.enemy:SetWordWrap(true)
-
-            row.rating = row:CreateFontString(nil, "OVERLAY")
-            row.rating:SetFont(lib.FONT_BODY, 10, "")
-            row.rating:SetPoint("LEFT", 420, 0)
-            row.rating:SetWidth(90)
-            row.rating:SetJustifyH("CENTER")
-
-            row.duration = row:CreateFontString(nil, "OVERLAY")
-            row.duration:SetFont(lib.FONT_BODY, 10, "")
-            row.duration:SetPoint("LEFT", 514, 0)
-            row.duration:SetWidth(36)
-            row.duration:SetJustifyH("CENTER")
-
-            row.timeStr = row:CreateFontString(nil, "OVERLAY")
-            row.timeStr:SetFont(lib.FONT_BODY, 10, "")
-            row.timeStr:SetPoint("LEFT", 554, 0)
-            row.timeStr:SetWidth(95)
-            row.timeStr:SetJustifyH("RIGHT")
-
-            row.mapStr = row:CreateFontString(nil, "OVERLAY")
-            row.mapStr:SetFont(lib.FONT_BODY, 10, "")
-            row.mapStr:SetPoint("LEFT", 652, 0)
-            row.mapStr:SetWidth(34)
-            row.mapStr:SetJustifyH("CENTER")
-            row.mapStr:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-
-            row.replayBtn = CreateFrame("Button", nil, row)
-            row.replayBtn:SetSize(50, 18)
-            row.replayBtn:SetPoint("LEFT", 688, 0)
-            row.replayBtn.bg = row.replayBtn:CreateTexture(nil, "BACKGROUND")
-            row.replayBtn.bg:SetAllPoints()
-            row.replayBtn.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
-            row.replayBtn.bdr = row.replayBtn:CreateTexture(nil, "BORDER")
-            row.replayBtn.bdr:SetPoint("TOPLEFT"); row.replayBtn.bdr:SetPoint("BOTTOMRIGHT")
-            row.replayBtn.bdr:SetColorTexture(0, 0, 0, 0)
-            row.replayBtn.icon = row.replayBtn:CreateFontString(nil, "OVERLAY")
-            row.replayBtn.icon:SetFont(lib.FONT_BODY, 9, "")
-            row.replayBtn.icon:SetPoint("CENTER")
-            row.replayBtn.icon:SetText("Replay >")
-            row.replayBtn.icon:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
-            row.replayBtn:SetScript("OnEnter", function(self)
-                self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.3)
-                self.icon:SetTextColor(1, 1, 1)
-            end)
-            row.replayBtn:SetScript("OnLeave", function(self)
-                self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
-                self.icon:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
-            end)
-
-            -- Alternating background
-            row.bg = row:CreateTexture(nil, "BACKGROUND")
-            row.bg:SetAllPoints()
-
-            -- Hover highlight
-            local hl = row:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetAllPoints()
-            hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
-        end
-
-        row:SetPoint("TOPLEFT", 0, -((displayIdx - 1) * ROW_HEIGHT))
-
-        -- Alternating row color
-        if displayIdx % 2 == 0 then
-            row.bg:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
-        else
-            row.bg:SetColorTexture(0, 0, 0, 0)
-        end
-
-        row.index:SetText("#" .. i)
-        row.index:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-
-        if game.result == "WIN" then
-            row.result:SetText("|cff00ff00WIN|r")
-        else
-            row.result:SetText("|cffff0000LOSS|r")
-        end
-
-        -- Friendly team — show class-colored names
-        local friendlyStr = FormatTeamNames(game.friendlyTeam)
-        row.friendly:SetText(friendlyStr or "—")
-
-        row.vs:SetText("vs")
-
-        row.enemy:SetText(FormatEnemyTeam(game))
-        row.rating:SetText(FormatRatingChange(game))
-
-        local dur = (game.startTime and game.endTime) and (game.endTime - game.startTime) or nil
-        row.duration:SetText(FormatDuration(dur))
-        row.duration:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
-
-        row.timeStr:SetText(FormatTime(game.startTime))
-        row.mapStr:SetText(AbbrevMap(game.map))
-        row.timeStr:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-
-        -- Replay button
-        if game.eventLog then
-            row.replayBtn:Show()
-            row.replayBtn:SetScript("OnClick", function()
-                lib:HideOptionsPanel()
-                addon:OpenReplay(game)
-            end)
-        else
-            row.replayBtn:Hide()
-        end
-
-        row:Show()
-        totalHeight = totalHeight + ROW_HEIGHT
-    end
-
-    content:SetHeight(math.max(totalHeight, 1))
+    -- Size the scroll child to the full filtered list; only the viewport rows
+    -- are realized as frames.
+    content:SetHeight(math.max(#filtered * ROW_HEIGHT, 1))
+    scrollFrame:SetVerticalScroll(0)
+    historyView:Render()
 
     RefreshStats(filtered)
+    UpdateResetButton()
 end
 
 ---------------------------------------------------------------------------
 -- Sessions Tab Content
 ---------------------------------------------------------------------------
+do  -- wrap section: keeps its locals out of the main chunk's 200-local budget
 local sessionFilters = {
     bracket = "All",
     days = 0,
@@ -3000,16 +3225,17 @@ end
 -- Session column headers
 local sessionHeaderY = -40
 local sessionHeaders = {
-    { text = "#",        x = 4,   w = 24,  justify = "RIGHT" },
-    { text = "Date",     x = 32,  w = 100, justify = "LEFT" },
-    { text = "Partners", x = 136, w = 160, justify = "LEFT" },
-    { text = "Bracket",  x = 300, w = 50,  justify = "CENTER" },
-    { text = "Games",    x = 355, w = 40,  justify = "CENTER" },
-    { text = "W-L",      x = 400, w = 50,  justify = "CENTER" },
-    { text = "Win%",     x = 455, w = 45,  justify = "CENTER" },
-    { text = "Rating",   x = 505, w = 120, justify = "CENTER" },
-    { text = "Net",      x = 630, w = 50,  justify = "CENTER" },
-    { text = "",         x = 690, w = 30,  justify = "CENTER" },
+    { text = "#",        x = 4,   w = 22,  justify = "RIGHT" },
+    { text = "Date",     x = 28,  w = 92,  justify = "LEFT" },
+    { text = "Partners", x = 122, w = 130, justify = "LEFT" },
+    { text = "Bracket",  x = 254, w = 44,  justify = "CENTER" },
+    { text = "Games",    x = 300, w = 38,  justify = "CENTER" },
+    { text = "W-L",      x = 340, w = 46,  justify = "CENTER" },
+    { text = "Win%",     x = 388, w = 42,  justify = "CENTER" },
+    { text = "Rating",   x = 432, w = 104, justify = "CENTER" },
+    { text = "MMR",      x = 538, w = 104, justify = "CENTER" },
+    { text = "Net",      x = 646, w = 48,  justify = "CENTER" },
+    { text = "",         x = 696, w = 28,  justify = "CENTER" },
 }
 for _, h in ipairs(sessionHeaders) do
     if h.text ~= "" then
@@ -3112,64 +3338,71 @@ function RefreshSessions()
             row.index = row:CreateFontString(nil, "OVERLAY")
             row.index:SetFont(lib.FONT_BODY, 10, "")
             row.index:SetPoint("LEFT", 4, 0)
-            row.index:SetWidth(24)
+            row.index:SetWidth(22)
             row.index:SetJustifyH("RIGHT")
 
             row.dateStr = row:CreateFontString(nil, "OVERLAY")
             row.dateStr:SetFont(lib.FONT_BODY, 10, "")
-            row.dateStr:SetPoint("LEFT", 32, 0)
-            row.dateStr:SetWidth(100)
+            row.dateStr:SetPoint("LEFT", 28, 0)
+            row.dateStr:SetWidth(92)
             row.dateStr:SetJustifyH("LEFT")
             row.dateStr:SetWordWrap(false)
 
             row.partners = row:CreateFontString(nil, "OVERLAY")
             row.partners:SetFont(lib.FONT_BODY, 10, "")
-            row.partners:SetPoint("LEFT", 136, 0)
-            row.partners:SetWidth(160)
+            row.partners:SetPoint("LEFT", 122, 0)
+            row.partners:SetWidth(130)
             row.partners:SetJustifyH("LEFT")
             row.partners:SetWordWrap(false)
 
             row.bracket = row:CreateFontString(nil, "OVERLAY")
             row.bracket:SetFont(lib.FONT_BODY, 10, "")
-            row.bracket:SetPoint("LEFT", 300, 0)
-            row.bracket:SetWidth(50)
+            row.bracket:SetPoint("LEFT", 254, 0)
+            row.bracket:SetWidth(44)
             row.bracket:SetJustifyH("CENTER")
 
             row.games = row:CreateFontString(nil, "OVERLAY")
             row.games:SetFont(lib.FONT_BODY, 10, "")
-            row.games:SetPoint("LEFT", 355, 0)
-            row.games:SetWidth(40)
+            row.games:SetPoint("LEFT", 300, 0)
+            row.games:SetWidth(38)
             row.games:SetJustifyH("CENTER")
 
             row.wl = row:CreateFontString(nil, "OVERLAY")
             row.wl:SetFont(lib.FONT_BODY, 10, "")
-            row.wl:SetPoint("LEFT", 400, 0)
-            row.wl:SetWidth(50)
+            row.wl:SetPoint("LEFT", 340, 0)
+            row.wl:SetWidth(46)
             row.wl:SetJustifyH("CENTER")
 
             row.winPct = row:CreateFontString(nil, "OVERLAY")
             row.winPct:SetFont(lib.FONT_BODY, 10, "")
-            row.winPct:SetPoint("LEFT", 455, 0)
-            row.winPct:SetWidth(45)
+            row.winPct:SetPoint("LEFT", 388, 0)
+            row.winPct:SetWidth(42)
             row.winPct:SetJustifyH("CENTER")
 
             row.rating = row:CreateFontString(nil, "OVERLAY")
             row.rating:SetFont(lib.FONT_BODY, 10, "")
-            row.rating:SetPoint("LEFT", 505, 0)
-            row.rating:SetWidth(120)
+            row.rating:SetPoint("LEFT", 432, 0)
+            row.rating:SetWidth(104)
             row.rating:SetJustifyH("CENTER")
             row.rating:SetWordWrap(false)
 
+            row.mmr = row:CreateFontString(nil, "OVERLAY")
+            row.mmr:SetFont(lib.FONT_BODY, 10, "")
+            row.mmr:SetPoint("LEFT", 538, 0)
+            row.mmr:SetWidth(104)
+            row.mmr:SetJustifyH("CENTER")
+            row.mmr:SetWordWrap(false)
+
             row.net = row:CreateFontString(nil, "OVERLAY")
             row.net:SetFont(lib.FONT_BODY, 10, "")
-            row.net:SetPoint("LEFT", 630, 0)
-            row.net:SetWidth(50)
+            row.net:SetPoint("LEFT", 646, 0)
+            row.net:SetWidth(48)
             row.net:SetJustifyH("CENTER")
 
             row.expandIndicator = row:CreateFontString(nil, "OVERLAY")
             row.expandIndicator:SetFont(lib.FONT_BODY, 10, "")
-            row.expandIndicator:SetPoint("LEFT", 690, 0)
-            row.expandIndicator:SetWidth(30)
+            row.expandIndicator:SetPoint("LEFT", 696, 0)
+            row.expandIndicator:SetWidth(28)
             row.expandIndicator:SetJustifyH("CENTER")
 
             row.bg = row:CreateTexture(nil, "BACKGROUND")
@@ -3231,6 +3464,13 @@ function RefreshSessions()
             row.rating:SetText("|cff555555—|r")
         end
 
+        -- MMR: startMMR -> endMMR
+        if s.mmrStart and s.mmrEnd then
+            row.mmr:SetText("|cffaaaaaa" .. s.mmrStart .. " -> " .. s.mmrEnd .. "|r")
+        else
+            row.mmr:SetText("|cff555555—|r")
+        end
+
         -- Net rating change
         if s.ratingChange and s.ratingChange ~= 0 then
             local sign = s.ratingChange >= 0 and "+" or ""
@@ -3279,14 +3519,15 @@ function RefreshSessions()
             if not hrow.isHeader then
                 hrow.isHeader = true
                 local drillHeaders = {
-                    { text = "Result",   x = 26,  w = 32,  justify = "LEFT" },
-                    { text = "Friendly", x = 58,  w = 170, justify = "LEFT" },
-                    { text = "",         x = 230, w = 14,  justify = "CENTER" },
-                    { text = "Enemy",    x = 246, w = 170, justify = "LEFT" },
-                    { text = "Rating",   x = 420, w = 90,  justify = "CENTER" },
-                    { text = "Dur",      x = 514, w = 36,  justify = "LEFT" },
-                    { text = "Time",     x = 554, w = 95,  justify = "RIGHT" },
-                    { text = "Map",      x = 652, w = 34,  justify = "CENTER" },
+                    { text = "Result",   x = 24,  w = 28,  justify = "LEFT" },
+                    { text = "Friendly", x = 54,  w = 146, justify = "LEFT" },
+                    { text = "",         x = 200, w = 12,  justify = "CENTER" },
+                    { text = "Enemy",    x = 214, w = 146, justify = "LEFT" },
+                    { text = "Rating",   x = 362, w = 76,  justify = "CENTER" },
+                    { text = "MMR",      x = 440, w = 92,  justify = "CENTER" },
+                    { text = "Dur",      x = 534, w = 28,  justify = "LEFT" },
+                    { text = "Time",     x = 562, w = 86,  justify = "RIGHT" },
+                    { text = "Map",      x = 650, w = 30,  justify = "CENTER" },
                 }
                 for _, dh in ipairs(drillHeaders) do
                     if dh.text ~= "" then
@@ -3313,13 +3554,13 @@ function RefreshSessions()
 
                     mrow.result = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.result:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.result:SetPoint("LEFT", 26, 0)
-                    mrow.result:SetWidth(32)
+                    mrow.result:SetPoint("LEFT", 24, 0)
+                    mrow.result:SetWidth(28)
 
                     mrow.friendly = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.friendly:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.friendly:SetPoint("LEFT", 58, 0)
-                    mrow.friendly:SetWidth(170)
+                    mrow.friendly:SetPoint("LEFT", 54, 0)
+                    mrow.friendly:SetWidth(146)
                     mrow.friendly:SetJustifyH("LEFT")
                     mrow.friendly:SetMaxLines(2)
                     mrow.friendly:SetNonSpaceWrap(false)
@@ -3327,15 +3568,15 @@ function RefreshSessions()
 
                     mrow.vs = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.vs:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.vs:SetPoint("LEFT", 230, 0)
-                    mrow.vs:SetWidth(14)
+                    mrow.vs:SetPoint("LEFT", 200, 0)
+                    mrow.vs:SetWidth(12)
                     mrow.vs:SetJustifyH("CENTER")
                     mrow.vs:SetTextColor(C.textMuted[1], C.textMuted[2], C.textMuted[3])
 
                     mrow.enemy = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.enemy:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.enemy:SetPoint("LEFT", 246, 0)
-                    mrow.enemy:SetWidth(170)
+                    mrow.enemy:SetPoint("LEFT", 214, 0)
+                    mrow.enemy:SetWidth(146)
                     mrow.enemy:SetJustifyH("LEFT")
                     mrow.enemy:SetMaxLines(2)
                     mrow.enemy:SetNonSpaceWrap(false)
@@ -3343,26 +3584,33 @@ function RefreshSessions()
 
                     mrow.rating = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.rating:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.rating:SetPoint("LEFT", 420, 0)
-                    mrow.rating:SetWidth(90)
+                    mrow.rating:SetPoint("LEFT", 362, 0)
+                    mrow.rating:SetWidth(76)
                     mrow.rating:SetJustifyH("CENTER")
+
+                    mrow.mmr = mrow:CreateFontString(nil, "OVERLAY")
+                    mrow.mmr:SetFont(lib.FONT_BODY, 10, "")
+                    mrow.mmr:SetPoint("LEFT", 440, 0)
+                    mrow.mmr:SetWidth(92)
+                    mrow.mmr:SetJustifyH("CENTER")
+                    mrow.mmr:SetWordWrap(false)
 
                     mrow.duration = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.duration:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.duration:SetPoint("LEFT", 514, 0)
-                    mrow.duration:SetWidth(36)
+                    mrow.duration:SetPoint("LEFT", 534, 0)
+                    mrow.duration:SetWidth(28)
                     mrow.duration:SetJustifyH("CENTER")
 
                     mrow.timeStr = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.timeStr:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.timeStr:SetPoint("LEFT", 554, 0)
-                    mrow.timeStr:SetWidth(95)
+                    mrow.timeStr:SetPoint("LEFT", 562, 0)
+                    mrow.timeStr:SetWidth(86)
                     mrow.timeStr:SetJustifyH("RIGHT")
 
                     mrow.mapStr = mrow:CreateFontString(nil, "OVERLAY")
                     mrow.mapStr:SetFont(lib.FONT_BODY, 10, "")
-                    mrow.mapStr:SetPoint("LEFT", 652, 0)
-                    mrow.mapStr:SetWidth(34)
+                    mrow.mapStr:SetPoint("LEFT", 650, 0)
+                    mrow.mapStr:SetWidth(30)
                     mrow.mapStr:SetJustifyH("CENTER")
                     mrow.mapStr:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
 
@@ -3370,7 +3618,7 @@ function RefreshSessions()
                     -- only when the match has a recorded event log.
                     mrow.replayBtn = CreateFrame("Button", nil, mrow)
                     mrow.replayBtn:SetSize(50, 18)
-                    mrow.replayBtn:SetPoint("LEFT", 688, 0)
+                    mrow.replayBtn:SetPoint("LEFT", 686, 0)
                     mrow.replayBtn.bg = mrow.replayBtn:CreateTexture(nil, "BACKGROUND")
                     mrow.replayBtn.bg:SetAllPoints()
                     mrow.replayBtn.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
@@ -3412,6 +3660,7 @@ function RefreshSessions()
 
                 mrow.enemy:SetText(FormatEnemyTeam(game))
                 mrow.rating:SetText(FormatRatingChange(game))
+                mrow.mmr:SetText(FormatMMR(game))
 
                 -- Duration
                 local dur = (game.startTime and game.endTime) and (game.endTime - game.startTime) or nil
@@ -3444,10 +3693,12 @@ function RefreshSessions()
 
     sessContent:SetHeight(math.max(totalHeight, 1))
 end
+end  -- end Sessions Tab Content wrap
 
 ---------------------------------------------------------------------------
 -- Teams Tab Content
 ---------------------------------------------------------------------------
+do  -- wrap section: keeps its locals out of the main chunk's 200-local budget
 local teamFilters = {
     bracket = "All",
     season = currentSeason,
@@ -3693,6 +3944,367 @@ function RefreshTeams()
 
     teamContent:SetHeight(math.max(totalHeight, 1))
 end
+end  -- end Teams Tab Content wrap
+
+---------------------------------------------------------------------------
+-- Enemies Tab Content
+-- Lifetime W/L and cumulative net rating vs each opponent you've faced.
+---------------------------------------------------------------------------
+-- Defaults to All Seasons (lifetime); bracket/season can still be narrowed.
+do  -- wrap section: keeps its locals out of the main chunk's 200-local budget
+local enemyFilters = {
+    bracket = "All",
+    season = nil,
+    search = "",
+}
+
+local enemyBracketDD = CreateSearchableDropdown(enemiesContainer, "TkEnemyBracketDD", 120, {
+    defaultLabel = "Bracket: All",
+    getOptions = function()
+        local out = {}
+        local brackets = { "2v2", "3v3", "5v5" }
+        for _, b in ipairs(brackets) do
+            table.insert(out, {
+                key = b,
+                text = b,
+                searchText = b:lower(),
+                isChecked = function() return enemyFilters.bracket == b end,
+            })
+        end
+        return out
+    end,
+    onToggle = function(key)
+        if enemyFilters.bracket == key then
+            enemyFilters.bracket = "All"
+        else
+            enemyFilters.bracket = key
+        end
+        if RefreshEnemies then RefreshEnemies() end
+    end,
+    onClear = function()
+        enemyFilters.bracket = "All"
+        if RefreshEnemies then RefreshEnemies() end
+    end,
+    getLabel = function()
+        if enemyFilters.bracket == "All" then return "Bracket: All" end
+        return "Bracket: " .. enemyFilters.bracket
+    end,
+})
+enemyBracketDD.frame:SetPoint("TOPLEFT", 10, -10)
+
+do
+    local enemySeasonDD = CreateSearchableDropdown(enemiesContainer, "TkEnemySeasonDD", 120, {
+        defaultLabel = "Season: All",
+        autoClose = true,
+        getOptions = function()
+            local out = {}
+            table.insert(out, {
+                key = "all",
+                text = "All Seasons",
+                searchText = "all",
+                isChecked = function() return enemyFilters.season == nil end,
+            })
+            for _, s in ipairs(CollectUniqueSeasons()) do
+                local key = tostring(s)
+                table.insert(out, {
+                    key = key,
+                    text = "Season " .. s,
+                    searchText = key,
+                    isChecked = function() return enemyFilters.season == s end,
+                })
+            end
+            return out
+        end,
+        onToggle = function(key)
+            if key == "all" then
+                enemyFilters.season = nil
+            else
+                local s = tonumber(key)
+                if enemyFilters.season == s then
+                    enemyFilters.season = nil
+                else
+                    enemyFilters.season = s
+                end
+            end
+            if RefreshEnemies then RefreshEnemies() end
+        end,
+        onClear = function() enemyFilters.season = nil; if RefreshEnemies then RefreshEnemies() end end,
+        getLabel = function()
+            if not enemyFilters.season then return "Season: All" end
+            return "|cffE8B923Season " .. enemyFilters.season .. "|r"
+        end,
+    })
+    enemySeasonDD.frame:SetPoint("LEFT", enemyBracketDD.frame, "RIGHT", 10, 0)
+end
+
+-- Search box: filter the enemy list by name substring
+local enemySearchBox = CreateFrame("EditBox", "TkEnemySearchBox", enemiesContainer, "BackdropTemplate")
+enemySearchBox:SetSize(180, 22)
+enemySearchBox:SetPoint("TOPLEFT", 272, -9)
+enemySearchBox:SetFont(lib.FONT_BODY, 11, "")
+enemySearchBox:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+enemySearchBox:SetAutoFocus(false)
+enemySearchBox:SetBackdrop({
+    bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+    edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+    edgeSize = 1,
+})
+enemySearchBox:SetBackdropColor(0, 0, 0, 0.4)
+enemySearchBox:SetBackdropBorderColor(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+enemySearchBox:SetTextInsets(6, 6, 0, 0)
+
+enemySearchBox.placeholder = enemySearchBox:CreateFontString(nil, "ARTWORK")
+enemySearchBox.placeholder:SetFont(lib.FONT_BODY, 11, "")
+enemySearchBox.placeholder:SetPoint("LEFT", 6, 0)
+enemySearchBox.placeholder:SetText("Search enemy name...")
+enemySearchBox.placeholder:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+enemySearchBox:SetScript("OnTextChanged", function(self)
+    local text = self:GetText()
+    enemyFilters.search = text and text:lower() or ""
+    self.placeholder:SetShown(enemyFilters.search == "")
+    if RefreshEnemies then RefreshEnemies() end
+end)
+enemySearchBox:SetScript("OnEscapePressed", function(self)
+    self:SetText("")
+    self:ClearFocus()
+end)
+
+-- Enemies column headers — clickable to sort. Click a column to sort by it;
+-- click again to flip direction. Numeric columns start descending, name ascending.
+local enemySort = { key = "games", dir = "desc" }
+
+local enemyHeaderY = -46
+local enemyHeaders = {
+    { text = "#",      x = 4,   w = 24,  justify = "RIGHT"  },                  -- not sortable
+    { text = "Enemy",  x = 32,  w = 260, justify = "LEFT",   sortKey = "name"   },
+    { text = "Games",  x = 300, w = 60,  justify = "CENTER", sortKey = "games"  },
+    { text = "W-L",    x = 368, w = 70,  justify = "CENTER", sortKey = "wins"   },
+    { text = "Win%",   x = 446, w = 56,  justify = "CENTER", sortKey = "winpct" },
+    { text = "Net",    x = 510, w = 90,  justify = "CENTER", sortKey = "net"    },
+}
+local enemyHeaderFS = {}  -- sortKey -> fontstring (so we can repaint the arrow)
+
+local function ApplyEnemyHeaderArrows()
+    for _, h in ipairs(enemyHeaders) do
+        if h.sortKey then
+            local fs = enemyHeaderFS[h.sortKey]
+            if fs then
+                local active = enemySort.key == h.sortKey
+                local arrow = active and (enemySort.dir == "desc" and " v" or " ^") or ""
+                fs:SetText(h.text .. arrow)
+                if active then
+                    fs:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+                else
+                    fs:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+                end
+            end
+        end
+    end
+end
+
+for _, h in ipairs(enemyHeaders) do
+    if h.sortKey then
+        local btn = CreateFrame("Button", nil, enemiesContainer)
+        btn:SetPoint("TOPLEFT", h.x, enemyHeaderY)
+        btn:SetSize(h.w, 14)
+        local fs = btn:CreateFontString(nil, "OVERLAY")
+        fs:SetFont(lib.FONT_BODY, 10, "")
+        fs:SetAllPoints()
+        fs:SetJustifyH(h.justify)
+        fs:SetWordWrap(false)
+        fs:SetText(h.text)
+        fs:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+        enemyHeaderFS[h.sortKey] = fs
+        btn:SetScript("OnClick", function()
+            if enemySort.key == h.sortKey then
+                enemySort.dir = (enemySort.dir == "desc") and "asc" or "desc"
+            else
+                enemySort.key = h.sortKey
+                enemySort.dir = (h.sortKey == "name") and "asc" or "desc"
+            end
+            ApplyEnemyHeaderArrows()
+            if RefreshEnemies then RefreshEnemies() end
+        end)
+        btn:SetScript("OnEnter", function()
+            if enemySort.key ~= h.sortKey then
+                fs:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+            end
+        end)
+        btn:SetScript("OnLeave", ApplyEnemyHeaderArrows)
+    else
+        local fs = enemiesContainer:CreateFontString(nil, "OVERLAY")
+        fs:SetFont(lib.FONT_BODY, 10, "")
+        fs:SetPoint("TOPLEFT", h.x, enemyHeaderY)
+        fs:SetWidth(h.w)
+        fs:SetJustifyH(h.justify)
+        fs:SetWordWrap(false)
+        fs:SetText(h.text)
+        fs:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    end
+end
+ApplyEnemyHeaderArrows()
+
+-- Thin separator below enemy headers
+local enemyHeaderSep = enemiesContainer:CreateTexture(nil, "ARTWORK")
+enemyHeaderSep:SetHeight(1)
+enemyHeaderSep:SetPoint("TOPLEFT", 4, enemyHeaderY - 12)
+enemyHeaderSep:SetPoint("TOPRIGHT", -16, enemyHeaderY - 12)
+enemyHeaderSep:SetColorTexture(C.divider[1], C.divider[2], C.divider[3], C.divider[4])
+
+-- Enemies scroll frame
+local enemyScrollFrame = CreateFrame("ScrollFrame", nil, enemiesContainer, "UIPanelScrollFrameTemplate")
+enemyScrollFrame:SetPoint("TOPLEFT", 10, enemyHeaderY - 14)
+enemyScrollFrame:SetPoint("BOTTOMRIGHT", -30, 10)
+
+local enemyContent = CreateFrame("Frame", nil, enemyScrollFrame)
+enemyContent:SetSize(740, 1)
+enemyScrollFrame:SetScrollChild(enemyContent)
+
+local ENEMY_ROW_HEIGHT = 28
+local enemyRowPool = {}
+
+---------------------------------------------------------------------------
+-- RefreshEnemies
+---------------------------------------------------------------------------
+function RefreshEnemies()
+    for _, row in ipairs(enemyRowPool) do
+        row:Hide()
+    end
+
+    local allGames = TrinketedHistoryDB and TrinketedHistoryDB.games or {}
+    local bracketFilter = enemyFilters.bracket ~= "All" and enemyFilters.bracket or nil
+    local enemies = ComputeEnemies(allGames, bracketFilter, enemyFilters.season)
+
+    -- Name search filter (case-insensitive substring)
+    local q = enemyFilters.search
+    if q and q ~= "" then
+        local matched = {}
+        for _, e in ipairs(enemies) do
+            if e.name and e.name:lower():find(q, 1, true) then
+                table.insert(matched, e)
+            end
+        end
+        enemies = matched
+    end
+
+    -- Apply the column sort chosen via the header buttons.
+    local function winPct(e)
+        local total = e.wins + e.losses
+        return total > 0 and (e.wins / total) or 0
+    end
+    local key, dir = enemySort.key, enemySort.dir
+    table.sort(enemies, function(a, b)
+        local av, bv
+        if key == "name" then
+            av, bv = (a.name or ""):lower(), (b.name or ""):lower()
+        elseif key == "wins" then
+            av, bv = a.wins, b.wins
+        elseif key == "winpct" then
+            av, bv = winPct(a), winPct(b)
+        elseif key == "net" then
+            av, bv = a.netRating or 0, b.netRating or 0
+        else -- "games"
+            av, bv = a.totalGames, b.totalGames
+        end
+        if av == bv then
+            -- Stable tiebreak: most games, then name.
+            if a.totalGames ~= b.totalGames then return a.totalGames > b.totalGames end
+            return (a.name or "") < (b.name or "")
+        end
+        if dir == "asc" then return av < bv else return av > bv end
+    end)
+
+    local totalHeight = 0
+
+    for i, e in ipairs(enemies) do
+        local row = enemyRowPool[i]
+        if not row then
+            row = CreateFrame("Frame", nil, enemyContent)
+            row:SetSize(740, ENEMY_ROW_HEIGHT)
+            enemyRowPool[i] = row
+
+            row.index = row:CreateFontString(nil, "OVERLAY")
+            row.index:SetFont(lib.FONT_BODY, 10, "")
+            row.index:SetPoint("LEFT", 4, 0)
+            row.index:SetWidth(24)
+            row.index:SetJustifyH("RIGHT")
+
+            row.name = row:CreateFontString(nil, "OVERLAY")
+            row.name:SetFont(lib.FONT_BODY, 10, "")
+            row.name:SetPoint("LEFT", 32, 0)
+            row.name:SetWidth(260)
+            row.name:SetJustifyH("LEFT")
+            row.name:SetWordWrap(false)
+
+            row.games = row:CreateFontString(nil, "OVERLAY")
+            row.games:SetFont(lib.FONT_BODY, 10, "")
+            row.games:SetPoint("LEFT", 300, 0)
+            row.games:SetWidth(60)
+            row.games:SetJustifyH("CENTER")
+
+            row.wl = row:CreateFontString(nil, "OVERLAY")
+            row.wl:SetFont(lib.FONT_BODY, 10, "")
+            row.wl:SetPoint("LEFT", 368, 0)
+            row.wl:SetWidth(70)
+            row.wl:SetJustifyH("CENTER")
+
+            row.winPct = row:CreateFontString(nil, "OVERLAY")
+            row.winPct:SetFont(lib.FONT_BODY, 10, "")
+            row.winPct:SetPoint("LEFT", 446, 0)
+            row.winPct:SetWidth(56)
+            row.winPct:SetJustifyH("CENTER")
+
+            row.net = row:CreateFontString(nil, "OVERLAY")
+            row.net:SetFont(lib.FONT_BODY, 10, "")
+            row.net:SetPoint("LEFT", 510, 0)
+            row.net:SetWidth(90)
+            row.net:SetJustifyH("CENTER")
+
+            row.bg = row:CreateTexture(nil, "BACKGROUND")
+            row.bg:SetAllPoints()
+
+            local hl = row:CreateTexture(nil, "HIGHLIGHT")
+            hl:SetAllPoints()
+            hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+        end
+
+        row:SetPoint("TOPLEFT", 0, -totalHeight)
+
+        if i % 2 == 0 then
+            row.bg:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+        else
+            row.bg:SetColorTexture(0, 0, 0, 0)
+        end
+
+        row.index:SetText("#" .. i)
+        row.index:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+        local color = CLASS_COLORS[e.class] or "ffffffff"
+        row.name:SetText("|c" .. color .. (e.name or "?") .. "|r")
+
+        row.games:SetText(e.totalGames)
+        row.games:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+
+        row.wl:SetText("|cff00ff00" .. e.wins .. "|r-|cffff0000" .. e.losses .. "|r")
+        row.winPct:SetText(FormatWinPct(e.wins, e.losses))
+
+        -- Net rating: cumulative points gained/lost vs this player
+        if e.netRating and e.netRating ~= 0 then
+            local sign = e.netRating >= 0 and "+" or ""
+            local netColor = e.netRating >= 0 and "|cff00ff00" or "|cffff0000"
+            row.net:SetText(netColor .. sign .. e.netRating .. "|r")
+        else
+            row.net:SetText("|cff888888" .. "0" .. "|r")
+        end
+
+        row:Show()
+        totalHeight = totalHeight + ENEMY_ROW_HEIGHT
+    end
+
+    enemyContent:SetHeight(math.max(totalHeight, 1))
+end
+end  -- end Enemies Tab Content wrap
 
 local function ToggleHistory()
     if lib:IsOptionsPanelShown() then
@@ -3770,6 +4382,7 @@ minimapButton:SetScript("OnClick", function(self, button)
         print("  /trinketed minimap — toggle minimap button")
         print("  /trinketed hdebug — toggle history debug logging")
         print("  /trinketed tsdebug — force-show timestamp overlay + barcode")
+        print("  /trinketed sbdebug — show live scoreboard leaderboard")
         print("  /trinketed status — dump current state")
     end
 end)
@@ -4290,6 +4903,7 @@ local function RegisterSubCommands()
             if historyContent:IsShown() then
                 if activeTab == "sessions" then RefreshSessions()
                 elseif activeTab == "teams" then RefreshTeams()
+                elseif activeTab == "enemies" then RefreshEnemies()
                 else RefreshHistory() end
             end
             print("|cff00ccff" .. DISPLAY_NAME .. ":|r Cleared " .. old .. " games.")
@@ -4423,6 +5037,221 @@ local function RegisterSubCommands()
         end
     end)
 
+    -- Debug scoreboard/leaderboard window: pulls live per-player stats from the
+    -- match scoreboard (C_PvP.GetScoreInfo, with legacy GetBattlefieldScore
+    -- fallback) and ranks players by damage done. Refreshes on score updates.
+    local sbFrame = nil
+
+    local function GetScoreboardRows()
+        local rows = {}
+        local n = (GetNumBattlefieldScores and GetNumBattlefieldScores()) or 0
+        for i = 1, n do
+            local row
+            if C_PvP and C_PvP.GetScoreInfo then
+                local s = C_PvP.GetScoreInfo(i)
+                if s and s.name then
+                    row = {
+                        name = s.name,
+                        classToken = s.classToken,
+                        faction = s.faction,
+                        kb = s.killingBlows or 0,
+                        deaths = s.deaths or 0,
+                        damage = s.damageDone or 0,
+                        healing = s.healingDone or 0,
+                        rating = s.rating,
+                        ratingChange = s.ratingChange,
+                        mmr = s.prematchMMR,
+                        mmrChange = s.mmrChange,
+                    }
+                end
+            elseif GetBattlefieldScore then
+                -- Legacy column order: name(1) kb(2) hk(3) deaths(4) honor(5) faction(6)
+                -- race(7) class(8) classToken(9) damage(10) healing(11) rating(12)
+                -- ratingChange(13) preMatchMMR(14) mmrChange(15)
+                local name, kb, _, deaths, _, faction, _, _, classToken, damageDone, healingDone,
+                      bgRating, ratingChange, preMatchMMR, mmrChange = GetBattlefieldScore(i)
+                if name then
+                    row = {
+                        name = name,
+                        classToken = classToken,
+                        faction = faction,
+                        kb = kb or 0,
+                        deaths = deaths or 0,
+                        damage = damageDone or 0,
+                        healing = healingDone or 0,
+                        rating = bgRating,
+                        ratingChange = ratingChange,
+                        mmr = preMatchMMR,
+                        mmrChange = mmrChange,
+                    }
+                end
+            end
+            if row then rows[#rows + 1] = row end
+        end
+        table.sort(rows, function(a, b) return a.damage > b.damage end)
+        return rows
+    end
+
+    local function FormatNum(n)
+        n = tonumber(n) or 0
+        if n >= 1000000 then
+            return string.format("%.1fm", n / 1000000)
+        elseif n >= 1000 then
+            return string.format("%.1fk", n / 1000)
+        end
+        return tostring(math.floor(n + 0.5))
+    end
+
+    -- Renders "1842" or "1842(+15)" — "—" when the API hasn't populated yet.
+    -- Values are floored: this client's string.format errors on %d with a float.
+    local function FormatRated(base, change)
+        base = tonumber(base)
+        if not base or base == 0 then return "—" end
+        base = math.floor(base + 0.5)
+        change = tonumber(change)
+        if change and change ~= 0 then
+            return string.format("%d(%+d)", base, math.floor(change + 0.5))
+        end
+        return tostring(base)
+    end
+
+    local function BuildScoreboardLines()
+        local lines = {}
+        if not GetNumBattlefieldScores then
+            lines[#lines + 1] = "|cffff4444GetNumBattlefieldScores API unavailable on this client.|r"
+            return lines
+        end
+        local rows = GetScoreboardRows()
+        lines[#lines + 1] = string.format("|cffF6C86B%-2s %-16s %4s %3s %8s %8s %11s %11s|r",
+            "#", "Name", "KB", "D", "Damage", "Healing", "Rating", "MMR")
+        if #rows == 0 then
+            lines[#lines + 1] = "|cff888888No scoreboard data — only available during/after a match. Hit [refresh].|r"
+        end
+        for i, r in ipairs(rows) do
+            local color = "ffffffff"
+            local cc = r.classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[r.classToken]
+            if cc then
+                color = cc.colorStr or string.format("ff%02x%02x%02x",
+                    math.floor(cc.r * 255 + 0.5), math.floor(cc.g * 255 + 0.5), math.floor(cc.b * 255 + 0.5))
+            end
+            local stripped = StripRealm and StripRealm(r.name) or r.name
+            lines[#lines + 1] = string.format("|cff888888%-2d|r |c%s%-16.16s|r %4d %3d %8s %8s %11s %11s",
+                i, color, stripped, math.floor((tonumber(r.kb) or 0) + 0.5), math.floor((tonumber(r.deaths) or 0) + 0.5),
+                FormatNum(r.damage), FormatNum(r.healing),
+                FormatRated(r.rating, r.ratingChange), FormatRated(r.mmr, r.mmrChange))
+        end
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "|cff888888Updated " .. date("%H:%M:%S") .. " — ranked by damage done.|r"
+        return lines
+    end
+
+    local function ToggleScoreboard()
+        if sbFrame then
+            if sbFrame:IsShown() then
+                sbFrame:Hide()
+            else
+                sbFrame:Show()
+                sbFrame.Render()
+            end
+            return
+        end
+
+        sbFrame = CreateFrame("Frame", "TrinketedScoreboardDebug", UIParent, "BackdropTemplate")
+        sbFrame:SetSize(620, 320)
+        sbFrame:SetPoint("CENTER")
+        sbFrame:SetBackdrop({
+            bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeSize = 1,
+        })
+        sbFrame:SetBackdropColor(0, 0, 0, 0.85)
+        sbFrame:SetBackdropBorderColor(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+        sbFrame:SetMovable(true)
+        sbFrame:EnableMouse(true)
+        sbFrame:RegisterForDrag("LeftButton")
+        sbFrame:SetScript("OnDragStart", sbFrame.StartMoving)
+        sbFrame:SetScript("OnDragStop", sbFrame.StopMovingOrSizing)
+        sbFrame:SetFrameStrata("HIGH")
+
+        local title = sbFrame:CreateFontString(nil, "OVERLAY")
+        title:SetFont(lib.FONT_DISPLAY, 10, "")
+        title:SetPoint("TOPLEFT", 6, -4)
+        title:SetText("|cffE8B923Scoreboard Debug|r  (live match leaderboard)")
+        title:SetTextColor(C.textBright and C.textBright[1] or 1, C.textBright and C.textBright[2] or 1, C.textBright and C.textBright[3] or 1)
+
+        local closeBtn = CreateFrame("Button", nil, sbFrame)
+        closeBtn:SetSize(16, 16)
+        closeBtn:SetPoint("TOPRIGHT", -4, -4)
+        closeBtn.text = closeBtn:CreateFontString(nil, "OVERLAY")
+        closeBtn.text:SetFont(lib.FONT_MONO, 12, "")
+        closeBtn.text:SetPoint("CENTER")
+        closeBtn.text:SetText("x")
+        closeBtn.text:SetTextColor(0.6, 0.6, 0.6)
+        closeBtn:SetScript("OnClick", function() sbFrame:Hide() end)
+
+        local refreshBtn = CreateFrame("Button", nil, sbFrame)
+        refreshBtn:SetSize(60, 14)
+        refreshBtn:SetPoint("TOPRIGHT", -22, -4)
+        refreshBtn.text = refreshBtn:CreateFontString(nil, "OVERLAY")
+        refreshBtn.text:SetFont(lib.FONT_MONO, 8, "")
+        refreshBtn.text:SetPoint("CENTER")
+        refreshBtn.text:SetText("[refresh]")
+        refreshBtn.text:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+        refreshBtn:SetScript("OnClick", function()
+            if RequestBattlefieldScoreData then RequestBattlefieldScoreData() end
+            sbFrame.Render()
+        end)
+
+        local scroll = CreateFrame("ScrollFrame", nil, sbFrame, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 4, -18)
+        scroll:SetPoint("BOTTOMRIGHT", -24, 4)
+
+        local content = CreateFrame("Frame", nil, scroll)
+        content:SetWidth(580)
+        content:SetHeight(1)
+        scroll:SetScrollChild(content)
+
+        sbFrame.lines = {}
+        local LINE_H = 13
+
+        local function Render()
+            local lines = BuildScoreboardLines()
+            for i, text in ipairs(lines) do
+                local fs = sbFrame.lines[i]
+                if not fs then
+                    fs = content:CreateFontString(nil, "OVERLAY")
+                    fs:SetFont(lib.FONT_MONO, 9, "")
+                    fs:SetPoint("TOPLEFT", 2, -((i - 1) * LINE_H))
+                    fs:SetPoint("RIGHT", -2, 0)
+                    fs:SetJustifyH("LEFT")
+                    sbFrame.lines[i] = fs
+                end
+                fs:SetText(text)
+                fs:Show()
+            end
+            for i = #lines + 1, #sbFrame.lines do
+                sbFrame.lines[i]:SetText("")
+                sbFrame.lines[i]:Hide()
+            end
+            content:SetHeight(math.max(1, #lines * LINE_H))
+        end
+        sbFrame.Render = Render
+
+        sbFrame:RegisterEvent("UPDATE_BATTLEFIELD_SCORE")
+        sbFrame:RegisterEvent("PVP_MATCH_COMPLETE")
+        sbFrame:SetScript("OnEvent", function()
+            if sbFrame:IsShown() then Render() end
+        end)
+
+        if RequestBattlefieldScoreData then RequestBattlefieldScoreData() end
+        Render()
+        sbFrame:Show()
+        print("|cffE8B923Trinketed:|r Scoreboard debug window opened. Toggle with /trinketed sbdebug")
+    end
+
+    lib:RegisterSubCommand("sbdebug", ToggleScoreboard)
+    lib:RegisterSubCommand("scoreboard", ToggleScoreboard)
+
 end
 
 ---------------------------------------------------------------------------
@@ -4454,6 +5283,16 @@ lib:RegisterSubAddon("History", {
 
         -- Refresh data every time the content frame is shown (tab selected or panel re-opened)
         contentFrame:HookScript("OnShow", function()
+            -- Re-query the season here: at login the API often still returns 0
+            -- (season data loads late), so the cached value can be stale.
+            local freshSeason = GetCurrentArenaSeason and GetCurrentArenaSeason() or 0
+            if freshSeason > 0 then currentSeason = freshSeason end
+
+            -- Default the season filter to the current season on each open
+            filters.season = currentSeason
+            if seasonDD then
+                seasonDD:SetLabel("|cffE8B923Season " .. currentSeason .. "|r")
+            end
             historyContent:Show()
             RefreshActiveTab()
         end)

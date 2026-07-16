@@ -11,32 +11,22 @@ local replayFrame = nil
 local session = nil
 
 -- Layout constants
--- The window is sized to match the main options-panel footprint (932x520) so it
--- fits any screen without scaling. The two teams are laid out side-by-side in
--- two columns (friendly | enemy) rather than stacked, so even 5v5 fits the short
--- height, and the combat feed sits in a third column on the right.
-local FRAME_W, FRAME_H = 932, 520
-local UNIT_PANEL_W = 512        -- spans both unit columns; feed begins just past it
-local FEED_PANEL_W = 408        -- right-hand combat feed column
-local TRANSPORT_H = 58
-local UNIT_FRAME_W = 160
+local FRAME_W, FRAME_H = 1100, 940
+local UNIT_PANEL_W = 580
+local FEED_PANEL_W = 500
+local TRANSPORT_H = 72
+local UNIT_FRAME_W = 200
 local UNIT_FRAME_H = 34
 local HP_BAR_H = 10
 local POWER_BAR_H = 5
-local CD_ICON_SIZE = 16
+local CD_ICON_SIZE = 20
 local CD_ICON_GAP = 1
-local CD_COLS = 4               -- cooldown icons wrap after this many (keeps them inside the column)
-local AURA_ICON_SIZE = 16
+local AURA_ICON_SIZE = 20
 local AURA_ICON_GAP = 2
 local AURA_ROW_GAP = 2
--- Vertical distance between stacked unit slots within a column: the frame plus
--- two aura rows (buffs + debuffs) beneath it, with gaps.
+-- Vertical distance between stacked unit slots: the frame plus two aura rows
+-- (buffs + debuffs) stacked beneath it, with gaps.
 local UNIT_ROW_STRIDE = UNIT_FRAME_H + 2 * (AURA_ICON_SIZE + AURA_ROW_GAP)
--- Two-column unit layout (coordinates are inside frame.unitPanel).
-local UNIT_COL1_X = 4           -- friendly column
-local UNIT_COL2_X = 256         -- enemy column
-local UNIT_COL_DIVIDER_X = 248  -- vertical divider between the two columns
-local UNITS_TOP_Y = -22         -- first unit row, just below the section labels
 local FEED_ROW_H = 20
 local FEED_ICON_SIZE = 14
 
@@ -376,11 +366,9 @@ local function UpdateUnitFrame(uf, playerState, currentTime, seeking, showAllAur
                     uf.icons[idx] = icon
                 end
 
-                -- Position using visible index. Wrap after CD_COLS columns so the
-                -- icons stay inside the unit's column instead of bleeding into the
-                -- adjacent team column or the feed.
-                local col = (visIdx - 1) % CD_COLS
-                local row = math.floor((visIdx - 1) / CD_COLS)
+                -- Position using visible index
+                local col = (visIdx - 1) % 11
+                local row = math.floor((visIdx - 1) / 11)
                 icon:ClearAllPoints()
                 icon:SetPoint("TOPLEFT", uf, "TOPRIGHT", 4 + col * (CD_ICON_SIZE + CD_ICON_GAP), -(row * (CD_ICON_SIZE + CD_ICON_GAP)))
 
@@ -606,30 +594,6 @@ local function CreateReplayFrame()
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
 
-    -- Fit-to-screen safety net: the window's natural size (FRAME_W x FRAME_H)
-    -- now matches the options panel (932x520) and fits a 1080p screen natively,
-    -- so this normally resolves to scale 1 (no-op). It only kicks in on unusually
-    -- small displays or a large UI scale, shrinking the whole window uniformly so
-    -- nothing is clipped, and re-centering it. We only ever scale DOWN (capped at
-    -- 1), so typical displays are unaffected.
-    local function FitToScreen()
-        local availW = UIParent:GetWidth() * 0.98
-        local availH = UIParent:GetHeight() * 0.96
-        local scale = math.min(1, availW / FRAME_W, availH / FRAME_H)
-        frame:SetScale(scale)
-        frame:ClearAllPoints()
-        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    end
-    FitToScreen()
-    -- Re-fit if the screen/UI scale changes while the addon is loaded.
-    pcall(function() frame:RegisterEvent("DISPLAY_SIZE_CHANGED") end)
-    pcall(function() frame:RegisterEvent("UI_SCALE_CHANGED") end)
-    frame:HookScript("OnEvent", function(_, event)
-        if event == "DISPLAY_SIZE_CHANGED" or event == "UI_SCALE_CHANGED" then
-            FitToScreen()
-        end
-    end)
-
     -- ===== BACK BUTTON =====
     -- Closes the replay and reopens the options panel on the History sub-addon
     -- (preserving its last-active inner tab), so the user can pick another
@@ -815,32 +779,29 @@ local function CreateReplayFrame()
         if frame.RefreshUnitFrames then frame:RefreshUnitFrames() end
     end)
 
-    -- Friendly unit frames (up to 5) — left column. X/Y set in RefreshUnitFrames.
+    -- Friendly unit frames (up to 5)
     frame.friendlyFrames = {}
     for i = 1, 5 do
-        frame.friendlyFrames[i] = CreateUnitFrame(frame.unitPanel, UNITS_TOP_Y - (i - 1) * (UNIT_ROW_STRIDE))
+        frame.friendlyFrames[i] = CreateUnitFrame(frame.unitPanel, -20 - (i - 1) * (UNIT_ROW_STRIDE))
         frame.friendlyFrames[i]:Hide()
     end
 
-    -- Vertical divider between the friendly and enemy columns (static).
+    -- Divider (position set dynamically by RefreshUnitFrames)
     local divider = frame.unitPanel:CreateTexture(nil, "ARTWORK")
-    divider:SetWidth(1)
-    divider:SetPoint("TOPLEFT", frame.unitPanel, "TOPLEFT", UNIT_COL_DIVIDER_X, -18)
-    divider:SetPoint("BOTTOMLEFT", frame.unitPanel, "BOTTOMLEFT", UNIT_COL_DIVIDER_X, 4)
+    divider:SetHeight(1)
     divider:SetColorTexture(C.divider[1], C.divider[2], C.divider[3], C.divider[4] or 0.25)
     frame.teamDivider = divider
 
-    -- Section label: Enemy (static, over the second column)
+    -- Section label: Enemy
     frame.enemyLabel = frame.unitPanel:CreateFontString(nil, "OVERLAY")
     frame.enemyLabel:SetFont(lib.FONT_DISPLAY, 10, "")
-    frame.enemyLabel:SetPoint("TOPLEFT", UNIT_COL2_X + 6, -4)
     frame.enemyLabel:SetTextColor(C.enemyRed[1], C.enemyRed[2], C.enemyRed[3])
     frame.enemyLabel:SetText("ENEMY TEAM")
 
-    -- Enemy unit frames (up to 5) — right column. X/Y set in RefreshUnitFrames.
+    -- Enemy unit frames (up to 5)
     frame.enemyFrames = {}
     for i = 1, 5 do
-        frame.enemyFrames[i] = CreateUnitFrame(frame.unitPanel, UNITS_TOP_Y - (i - 1) * (UNIT_ROW_STRIDE))
+        frame.enemyFrames[i] = CreateUnitFrame(frame.unitPanel, 0) -- positioned dynamically
         frame.enemyFrames[i]:Hide()
     end
 
@@ -977,14 +938,7 @@ local function CreateReplayFrame()
     frame.feedContent:SetHeight(1)
     frame.feedScroll:SetScrollChild(frame.feedContent)
 
-    frame.feedRows = {}  -- fixed-size row pool (virtualized window — see RenderFeedWindow)
-
-    -- The feed is virtualized: only the rows visible in the scroll viewport exist
-    -- as frames, regardless of how many events the match has. Re-render the window
-    -- whenever the user scrolls.
-    frame.feedScroll:HookScript("OnVerticalScroll", function()
-        if frame.RenderFeedWindow then frame:RenderFeedWindow() end
-    end)
+    frame.feedRows = {}  -- row pool
 
     -- ===== TRANSPORT BAR (bottom) =====
     frame.transport = CreateFrame("Frame", nil, frame)
@@ -1019,11 +973,7 @@ local function CreateReplayFrame()
     frame.btnPlay.text:SetText(">")
     frame.btnPlay.text:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
     frame.btnPlay:SetScript("OnClick", function()
-        if session then
-            session:TogglePlayPause()
-            -- Force one refresh so the button/feed update even when pausing into idle.
-            frame.snapFeedPending = true
-        end
+        if session then session:TogglePlayPause() end
     end)
 
     -- Jump to end
@@ -1201,16 +1151,10 @@ local function CreateReplayFrame()
     frame.markerPool = {}
 
     -- ===== OnUpdate: advance playback and refresh UI =====
-    -- Refresh work is throttled to ~33 Hz and skipped entirely when the replay is
-    -- idle (paused and not seeking). The old version ran a full unit + feed refresh
-    -- on every single frame — on a high-refresh monitor that's the same work 100+
-    -- times a second for a paused window, and it scaled with event count.
-    frame.refreshAccum = 0
-    local REFRESH_INTERVAL = 0.03
     frame:SetScript("OnUpdate", function(self, dt)
         if not session then return end
 
-        -- Scrub dragging is handled immediately for responsiveness.
+        -- Handle scrub dragging
         if frame.scrubbing then
             local x = frame.scrubTrack:GetLeft()
             local w = frame.scrubTrack:GetWidth()
@@ -1220,34 +1164,30 @@ local function CreateReplayFrame()
             frame.snapFeedPending = true
         end
 
-        -- Nothing changing → no work at all.
-        local active = session.status == "playing" or frame.snapFeedPending or frame.scrubbing
-        if not active then return end
+        -- Advance playback
+        session:Advance(dt)
 
-        -- Throttle; accumulate dt so playback time stays exact across skipped frames.
-        frame.refreshAccum = frame.refreshAccum + dt
-        if frame.refreshAccum < REFRESH_INTERVAL and not frame.snapFeedPending then return end
-        local elapsed = frame.refreshAccum
-        frame.refreshAccum = 0
-
+        -- Update play/pause button text
         if session.status == "playing" then
-            session:Advance(elapsed)
+            frame.btnPlay.text:SetText("||")
+        else
+            frame.btnPlay.text:SetText(">")
         end
 
-        -- Play/pause button text
-        frame.btnPlay.text:SetText(session.status == "playing" and "||" or ">")
-
-        -- Scrub thumb position
+        -- Update scrub thumb position
         if session.matchDuration > 0 then
             local frac = session.currentTime / session.matchDuration
             local trackW = frame.scrubTrack:GetWidth()
             frame.scrubThumb:SetPoint("CENTER", frame.scrubTrack, "LEFT", trackW * frac, 0)
         end
 
-        -- Time display
+        -- Update time display
         frame.timeText:SetText(FormatTime(session.currentTime) .. " / " .. FormatTime(session.matchDuration))
 
+        -- Update unit frames
         frame:RefreshUnitFrames()
+
+        -- Update feed highlight
         frame:RefreshFeedHighlight()
     end)
 
@@ -1266,11 +1206,11 @@ local function CreateReplayFrame()
             end
         end
 
-        -- Position friendly frames in the left column
+        -- Position friendly frames
         local friendlyCount = math.min(#friendly, 5)
         for i = 1, 5 do
             if i <= friendlyCount then
-                self.friendlyFrames[i]:SetPoint("TOPLEFT", UNIT_COL1_X, UNITS_TOP_Y - (i - 1) * (UNIT_ROW_STRIDE))
+                self.friendlyFrames[i]:SetPoint("TOPLEFT", 10, -20 - (i - 1) * (UNIT_ROW_STRIDE))
                 UpdateUnitFrame(self.friendlyFrames[i], friendly[i].state,
                     session.currentTime, session.seeking, self.showAllAuras)
             else
@@ -1278,12 +1218,20 @@ local function CreateReplayFrame()
             end
         end
 
-        -- Position enemy frames in the right column (the divider and enemy label
-        -- are now static, set once at creation).
+        -- Position divider and enemy label below friendly frames
+        local divY = -20 - friendlyCount * (UNIT_ROW_STRIDE) - 4
+        self.teamDivider:ClearAllPoints()
+        self.teamDivider:SetPoint("TOPLEFT", self.unitPanel, "TOPLEFT", 10, divY)
+        self.teamDivider:SetPoint("RIGHT", self.unitPanel, "RIGHT", -10, 0)
+
+        self.enemyLabel:ClearAllPoints()
+        self.enemyLabel:SetPoint("TOPLEFT", self.unitPanel, "TOPLEFT", 10, divY - 8)
+
+        local enemyStartY = divY - 24
         local enemyCount = math.min(#enemy, 5)
         for i = 1, 5 do
             if i <= enemyCount then
-                self.enemyFrames[i]:SetPoint("TOPLEFT", UNIT_COL2_X, UNITS_TOP_Y - (i - 1) * (UNIT_ROW_STRIDE))
+                self.enemyFrames[i]:SetPoint("TOPLEFT", 10, enemyStartY - (i - 1) * (UNIT_ROW_STRIDE))
                 UpdateUnitFrame(self.enemyFrames[i], enemy[i].state,
                     session.currentTime, session.seeking, self.showAllAuras)
             else
@@ -1339,288 +1287,250 @@ local function CreateReplayFrame()
 
         self.visibleFeedEvents = visible
 
-        -- Virtualized feed: size the scroll child to the full filtered list, but
-        -- only realize the rows visible in the viewport as frames. This keeps the
-        -- frame count (and per-frame work) bounded no matter how many thousands of
-        -- events a long match produces — the old code created one frame per event.
-        self.feedContent:SetHeight(math.max(#visible * FEED_ROW_H, 1))
-        self.feedScroll:SetVerticalScroll(0)  -- a new filter/search set: jump to top
-        self:RenderFeedWindow()
-    end
+        -- Create/update rows
+        local contentHeight = 0
+        for idx, ev in ipairs(visible) do
+            local row = self.feedRows[idx]
+            if not row then
+                row = CreateFrame("Button", nil, self.feedContent)
+                row:SetSize(FEED_PANEL_W - 30, FEED_ROW_H)
 
-    -- Create one pooled feed row. Tooltip/click handlers read row.ev (refreshed by
-    -- PopulateFeedRow) rather than capturing an event, so a row can be recycled for
-    -- different events as the window scrolls without rebuilding closures.
-    local function CreateFeedRow(parent)
-        local row = CreateFrame("Button", nil, parent)
-        row:SetSize(FEED_PANEL_W - 30, FEED_ROW_H)
+                row.bg = row:CreateTexture(nil, "BACKGROUND")
+                row.bg:SetAllPoints()
+                row.bg:SetColorTexture(0, 0, 0, 0)
 
-        row.bg = row:CreateTexture(nil, "BACKGROUND")
-        row.bg:SetAllPoints()
-        row.bg:SetColorTexture(0, 0, 0, 0)
+                -- Time label
+                row.timeText = row:CreateFontString(nil, "OVERLAY")
+                row.timeText:SetFont(lib.FONT_MONO, 9, "")
+                row.timeText:SetPoint("LEFT", 2, 0)
+                row.timeText:SetWidth(38)
+                row.timeText:SetJustifyH("LEFT")
 
-        row.timeText = row:CreateFontString(nil, "OVERLAY")
-        row.timeText:SetFont(lib.FONT_MONO, 9, "")
-        row.timeText:SetPoint("LEFT", 2, 0)
-        row.timeText:SetWidth(38)
-        row.timeText:SetJustifyH("LEFT")
+                -- Source name
+                row.srcText = row:CreateFontString(nil, "OVERLAY")
+                row.srcText:SetFont(lib.FONT_MONO, 9, "")
+                row.srcText:SetPoint("LEFT", 42, 0)
+                row.srcText:SetWidth(80)
+                row.srcText:SetJustifyH("RIGHT")
+                row.srcText:SetWordWrap(false)
 
-        row.srcText = row:CreateFontString(nil, "OVERLAY")
-        row.srcText:SetFont(lib.FONT_MONO, 9, "")
-        row.srcText:SetPoint("LEFT", 42, 0)
-        row.srcText:SetWidth(80)
-        row.srcText:SetJustifyH("RIGHT")
-        row.srcText:SetWordWrap(false)
+                -- Spell icon button (separate frame for isolated tooltip)
+                row.iconBtn = CreateFrame("Button", nil, row)
+                row.iconBtn:SetSize(FEED_ICON_SIZE, FEED_ICON_SIZE)
+                row.iconBtn:SetPoint("LEFT", 126, 0)
+                row.icon = row.iconBtn:CreateTexture(nil, "ARTWORK")
+                row.icon:SetAllPoints()
 
-        row.iconBtn = CreateFrame("Button", nil, row)
-        row.iconBtn:SetSize(FEED_ICON_SIZE, FEED_ICON_SIZE)
-        row.iconBtn:SetPoint("LEFT", 126, 0)
-        row.icon = row.iconBtn:CreateTexture(nil, "ARTWORK")
-        row.icon:SetAllPoints()
-        row.iconBtn:SetScript("OnEnter", function(self)
-            if row.ev and row.ev.spellID then
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetSpellByID(row.ev.spellID)
-                GameTooltip:Show()
+                -- Spell name
+                row.spellText = row:CreateFontString(nil, "OVERLAY")
+                row.spellText:SetFont(lib.FONT_MONO, 9, "")
+                row.spellText:SetPoint("LEFT", 144, 0)
+                row.spellText:SetWidth(120)
+                row.spellText:SetJustifyH("LEFT")
+                row.spellText:SetWordWrap(false)
+
+                -- Arrow + target + amount
+                row.detailText = row:CreateFontString(nil, "OVERLAY")
+                row.detailText:SetFont(lib.FONT_MONO, 9, "")
+                row.detailText:SetPoint("LEFT", 268, 0)
+                row.detailText:SetPoint("RIGHT", -2, 0)
+                row.detailText:SetJustifyH("LEFT")
+                row.detailText:SetWordWrap(false)
+
+                self.feedRows[idx] = row
             end
-        end)
-        row.iconBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        row.iconBtn:SetScript("OnClick", function()
-            if session and row.ev then
-                session:SeekTo(row.ev.time)
-                session.status = "paused"
-                frame.snapFeedPending = true
+
+            row:SetPoint("TOPLEFT", 0, -((idx - 1) * FEED_ROW_H))
+            row.eventTime = ev.time
+
+            -- Time
+            row.timeText:SetText(FormatTimeTenths(ev.time))
+            row.timeText:SetTextColor(0.53, 0.53, 0.53)
+
+            -- Spell icon + tooltip only on icon hover
+            local spellID = ev.spellID
+            local texID = spellID and GetSpellTexture(spellID)
+            if texID then
+                row.icon:SetTexture(texID)
+                row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                row.iconBtn:Show()
+                row.iconBtn:SetScript("OnEnter", function(self)
+                    if spellID then
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetSpellByID(spellID)
+                        GameTooltip:Show()
+                    end
+                end)
+                row.iconBtn:SetScript("OnLeave", function()
+                    GameTooltip:Hide()
+                end)
+                -- Icon click also seeks
+                row.iconBtn:SetScript("OnClick", function()
+                    if session then
+                        session:SeekTo(ev.time)
+                        session.status = "paused"
+                    end
+                end)
+            else
+                row.iconBtn:Hide()
             end
-        end)
 
-        row.spellText = row:CreateFontString(nil, "OVERLAY")
-        row.spellText:SetFont(lib.FONT_MONO, 9, "")
-        row.spellText:SetPoint("LEFT", 144, 0)
-        row.spellText:SetWidth(120)
-        row.spellText:SetJustifyH("LEFT")
-        row.spellText:SetWordWrap(false)
+            -- Format source, detail text
+            local catColor = CAT_COLORS[ev.cat] or { r = 0.7, g = 0.7, b = 0.7 }
+            local catHex = string.format("%02x%02x%02x",
+                catColor.r * 255, catColor.g * 255, catColor.b * 255)
 
-        row.detailText = row:CreateFontString(nil, "OVERLAY")
-        row.detailText:SetFont(lib.FONT_MONO, 9, "")
-        row.detailText:SetPoint("LEFT", 268, 0)
-        row.detailText:SetPoint("RIGHT", -2, 0)
-        row.detailText:SetJustifyH("LEFT")
-        row.detailText:SetWordWrap(false)
+            if ev.cat == "death" then
+                row.srcText:SetText("")
+                row.spellText:SetText("|cffff0000DEATH|r")
+                row.iconBtn:Hide()
+                row.detailText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
 
-        row:SetScript("OnClick", function()
-            if session and row.ev then
-                session:SeekTo(row.ev.time)
-                session.status = "paused"
-                frame.snapFeedPending = true
-            end
-        end)
-
-        return row
-    end
-
-    -- Fill a pooled row with one event's text/icon. No script churn — handlers
-    -- are static (set in CreateFeedRow) and read row.ev.
-    local function PopulateFeedRow(row, ev)
-        row.ev = ev
-        row.eventTime = ev.time
-
-        row.timeText:SetText(FormatTimeTenths(ev.time))
-        row.timeText:SetTextColor(0.53, 0.53, 0.53)
-
-        local spellID = ev.spellID
-        local texID = spellID and GetSpellTexture(spellID)
-        if texID then
-            row.icon:SetTexture(texID)
-            row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-            row.iconBtn:Show()
-        else
-            row.iconBtn:Hide()
-        end
-
-        -- Floor the category color channels: this client's string.format throws on
-        -- a non-integer %x argument.
-        local catColor = CAT_COLORS[ev.cat] or { r = 0.7, g = 0.7, b = 0.7 }
-        local catHex = string.format("%02x%02x%02x",
-            math.floor(catColor.r * 255 + 0.5), math.floor(catColor.g * 255 + 0.5), math.floor(catColor.b * 255 + 0.5))
-
-        if ev.cat == "death" then
-            row.srcText:SetText("")
-            row.spellText:SetText("|cffff0000DEATH|r")
-            row.iconBtn:Hide()
-            row.detailText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
-
-        elseif ev.type == "damage" then
-            row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
-            row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
-            local detail = "> " .. ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r"
-            if ev.amount then
-                local amtStr = AbbrevNumber(ev.amount)
-                if ev.critical then amtStr = amtStr .. "*" end
-                detail = detail .. "  |cffff4444-" .. amtStr .. "|r"
-            end
-            row.detailText:SetText(detail)
-
-        elseif ev.type == "heal" or ev.type == "absorb" then
-            row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
-            row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
-            local detail = ""
-            if ev.dstName and ev.dstName ~= ev.srcName then
-                detail = "> " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
-            end
-            if ev.amount then
-                local amtStr = AbbrevNumber(ev.amount)
-                if ev.critical then amtStr = amtStr .. "*" end
-                if ev.type == "absorb" then
-                    detail = detail .. "  |cffffff00" .. amtStr .. " abs|r"
-                else
-                    detail = detail .. "  |cff44ff44+" .. amtStr .. "|r"
+            elseif ev.type == "damage" then
+                row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
+                row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
+                local detail = "> " .. ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r"
+                if ev.amount then
+                    local amtStr = AbbrevNumber(ev.amount)
+                    if ev.critical then amtStr = amtStr .. "*" end
+                    detail = detail .. "  |cffff4444-" .. amtStr .. "|r"
                 end
-            end
-            row.detailText:SetText(detail)
+                row.detailText:SetText(detail)
 
-        elseif ev.type == "interrupt" then
-            row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
-            row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
-            local detail = ""
-            if ev.dstName then
-                detail = "> " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
-            end
-            if ev.extraSpell then
-                detail = detail .. " |cff888888(" .. ev.extraSpell .. ")|r"
-            end
-            row.detailText:SetText(detail)
-
-        elseif ev.type == "dispel" or ev.type == "steal" then
-            row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
-            local verb = ev.type == "steal" and "stole" or "dispelled"
-            row.spellText:SetText("|cff" .. catHex .. verb .. "|r")
-            local detail = ""
-            if ev.extraSpell then
-                detail = "|cffffff00" .. ev.extraSpell .. "|r"
-            end
-            if ev.dstName then
-                detail = detail .. " > " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
-            end
-            row.detailText:SetText(detail)
-
-        elseif ev.type == "aura_applied" then
-            row.srcText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
-            local prefix = (ev.auraType == "DEBUFF") and "|cffff6666+" or "|cff66ff66+"
-            row.spellText:SetText(prefix .. (ev.spellName or "?") .. "|r")
-            row.detailText:SetText("")
-
-        elseif ev.type == "aura_removed" then
-            row.srcText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
-            local prefix = (ev.auraType == "DEBUFF") and "|cffff6666-" or "|cff66ff66-"
-            row.spellText:SetText(prefix .. (ev.spellName or "?") .. "|r")
-            row.detailText:SetText("")
-
-        elseif ev.type == "aura_break" then
-            row.srcText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
-            row.spellText:SetText("|cffff8800" .. (ev.spellName or "?") .. "|r")
-            local detail = "|cffff8800broken|r"
-            if ev.extraSpell then
-                detail = detail .. " |cff888888(by " .. ev.extraSpell .. ")|r"
-            end
-            row.detailText:SetText(detail)
-
-        elseif ev.type == "miss" then
-            row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
-            row.spellText:SetText("|cff888888" .. (ev.spellName or "?") .. "|r")
-            row.detailText:SetText("> " .. ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r" ..
-                "  |cff888888" .. (ev.missType or "MISS") .. "|r")
-
-        else
-            -- cast_success, cast_start, summon, energize, drain, etc.
-            row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
-            row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
-            local detail = ""
-            if ev.dstName and ev.dstName ~= ev.srcName then
-                detail = "> " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
-            end
-            if ev.amount and ev.amount ~= 0 then
-                detail = detail .. "  " .. AbbrevNumber(math.abs(ev.amount))
-            end
-            row.detailText:SetText(detail)
-        end
-    end
-
-    -- Index of the most recent event at or before the current time (binary search
-    -- over the time-ordered visible list) — used for the accent highlight and the
-    -- playback auto-follow. O(log n) instead of scanning every row each frame.
-    function frame:FeedLastPastIndex()
-        local visible = self.visibleFeedEvents
-        if not visible then return nil end
-        local total = #visible
-        if total == 0 then return nil end
-        local ct = session and session.currentTime or 0
-        if visible[1].time > ct then return nil end
-        local lo, hi, ans = 1, total, 1
-        while lo <= hi do
-            local mid = math.floor((lo + hi) / 2)
-            if visible[mid].time <= ct then ans = mid; lo = mid + 1 else hi = mid - 1 end
-        end
-        return ans
-    end
-
-    -- Render only the feed rows visible in the current scroll viewport, recycling
-    -- the pool. Called on filter/search change, on scroll, and during playback.
-    function frame:RenderFeedWindow()
-        local visible = self.visibleFeedEvents
-        if not visible then return end
-        local total = #visible
-        local ct = session and session.currentTime or 0
-
-        local viewH = self.feedScroll:GetHeight()
-        if not viewH or viewH <= 0 then viewH = 360 end
-        local scroll = self.feedScroll:GetVerticalScroll() or 0
-        local poolNeeded = math.ceil(viewH / FEED_ROW_H) + 2
-        local first = math.max(1, math.floor(scroll / FEED_ROW_H) + 1)
-
-        local lastPastIdx = self:FeedLastPastIndex()
-
-        for slot = 1, poolNeeded do
-            local idx = first + slot - 1
-            local ev = visible[idx]
-            local row = self.feedRows[slot]
-            if ev then
-                if not row then
-                    row = CreateFeedRow(self.feedContent)
-                    self.feedRows[slot] = row
+            elseif ev.type == "heal" or ev.type == "absorb" then
+                row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
+                row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
+                local detail = ""
+                if ev.dstName and ev.dstName ~= ev.srcName then
+                    detail = "> " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
                 end
-                row:SetPoint("TOPLEFT", 0, -((idx - 1) * FEED_ROW_H))
-                PopulateFeedRow(row, ev)
-
-                -- Dim future events; accent the most recent past one.
-                local a = (ev.time <= ct) and 1.0 or 0.3
-                row.timeText:SetAlpha(a)
-                row.srcText:SetAlpha(a)
-                row.iconBtn:SetAlpha(a)
-                row.spellText:SetAlpha(a)
-                row.detailText:SetAlpha(a)
-                if lastPastIdx and idx == lastPastIdx then
-                    row.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.1)
-                else
-                    row.bg:SetColorTexture(0, 0, 0, 0)
+                if ev.amount then
+                    local amtStr = AbbrevNumber(ev.amount)
+                    if ev.critical then amtStr = amtStr .. "*" end
+                    if ev.type == "absorb" then
+                        detail = detail .. "  |cffffff00" .. amtStr .. " abs|r"
+                    else
+                        detail = detail .. "  |cff44ff44+" .. amtStr .. "|r"
+                    end
                 end
-                row:Show()
-            elseif row then
-                row:Hide()
+                row.detailText:SetText(detail)
+
+            elseif ev.type == "interrupt" then
+                row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
+                row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
+                local detail = ""
+                if ev.dstName then
+                    detail = "> " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
+                end
+                if ev.extraSpell then
+                    detail = detail .. " |cff888888(" .. ev.extraSpell .. ")|r"
+                end
+                row.detailText:SetText(detail)
+
+            elseif ev.type == "dispel" or ev.type == "steal" then
+                row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
+                local verb = ev.type == "steal" and "stole" or "dispelled"
+                row.spellText:SetText("|cff" .. catHex .. verb .. "|r")
+                local detail = ""
+                if ev.extraSpell then
+                    detail = "|cffffff00" .. ev.extraSpell .. "|r"
+                end
+                if ev.dstName then
+                    detail = detail .. " > " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
+                end
+                row.detailText:SetText(detail)
+
+            elseif ev.type == "aura_applied" then
+                row.srcText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
+                local prefix = (ev.auraType == "DEBUFF") and "|cffff6666+" or "|cff66ff66+"
+                row.spellText:SetText(prefix .. (ev.spellName or "?") .. "|r")
+                row.detailText:SetText("")
+
+            elseif ev.type == "aura_removed" then
+                row.srcText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
+                local prefix = (ev.auraType == "DEBUFF") and "|cffff6666-" or "|cff66ff66-"
+                row.spellText:SetText(prefix .. (ev.spellName or "?") .. "|r")
+                row.detailText:SetText("")
+
+            elseif ev.type == "aura_break" then
+                row.srcText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
+                row.spellText:SetText("|cffff8800" .. (ev.spellName or "?") .. "|r")
+                local detail = "|cffff8800broken|r"
+                if ev.extraSpell then
+                    detail = detail .. " |cff888888(by " .. ev.extraSpell .. ")|r"
+                end
+                row.detailText:SetText(detail)
+
+            elseif ev.type == "miss" then
+                row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
+                row.spellText:SetText("|cff888888" .. (ev.spellName or "?") .. "|r")
+                row.detailText:SetText("> " .. ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r" ..
+                    "  |cff888888" .. (ev.missType or "MISS") .. "|r")
+
+            else
+                -- cast_success, cast_start, summon, energize, drain, etc.
+                row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
+                row.spellText:SetText("|cff" .. catHex .. (ev.spellName or "?") .. "|r")
+                local detail = ""
+                if ev.dstName and ev.dstName ~= ev.srcName then
+                    detail = "> " .. ClassColorStr(ev.dstClass) .. ev.dstName .. "|r"
+                end
+                if ev.amount and ev.amount ~= 0 then
+                    detail = detail .. "  " .. AbbrevNumber(math.abs(ev.amount))
+                end
+                row.detailText:SetText(detail)
             end
+
+            -- Click to seek
+            row:SetScript("OnClick", function()
+                if session then
+                    session:SeekTo(ev.time)
+                    session.status = "paused"
+                end
+            end)
+
+            row:Show()
+            contentHeight = contentHeight + FEED_ROW_H
         end
+
+        self.feedContent:SetHeight(math.max(contentHeight, 1))
     end
 
-    -- Keep the playback position visible and refresh dimming. Cheap: moves the
-    -- scroll window (which re-renders ~one viewport of rows), no full-list scan.
+    -- ===== Refresh feed highlight and auto-scroll (called from OnUpdate) =====
     function frame:RefreshFeedHighlight()
         if not session or not self.visibleFeedEvents then return end
-        local lastPastIdx = self:FeedLastPastIndex()
+        local ct = session.currentTime
+        local lastPastIdx = nil
+        for idx, row in ipairs(self.feedRows) do
+            if row:IsShown() and row.eventTime then
+                row.bg:SetColorTexture(0, 0, 0, 0)
+                if row.eventTime <= ct then
+                    row.timeText:SetAlpha(1.0)
+                    row.srcText:SetAlpha(1.0)
+                    row.iconBtn:SetAlpha(1.0)
+                    row.spellText:SetAlpha(1.0)
+                    row.detailText:SetAlpha(1.0)
+                    lastPastIdx = idx
+                else
+                    row.timeText:SetAlpha(0.3)
+                    row.srcText:SetAlpha(0.3)
+                    row.iconBtn:SetAlpha(0.3)
+                    row.spellText:SetAlpha(0.3)
+                    row.detailText:SetAlpha(0.3)
+                end
+            end
+        end
+        -- Accent highlight on most recent past event
+        if lastPastIdx and self.feedRows[lastPastIdx] then
+            self.feedRows[lastPastIdx].bg:SetColorTexture(
+                C.accent[1], C.accent[2], C.accent[3], 0.1)
+        end
+        -- Auto-scroll to keep current time visible during playback, or snap on explicit seek
         if (session.status == "playing" or self.snapFeedPending) and lastPastIdx then
             local scrollMax = self.feedScroll:GetVerticalScrollRange()
             local targetScroll = math.max(0, (lastPastIdx - 5) * FEED_ROW_H)
             self.feedScroll:SetVerticalScroll(math.min(targetScroll, scrollMax))
         end
-        self:RenderFeedWindow()
         self.snapFeedPending = nil
     end
 
@@ -1752,14 +1662,6 @@ function addon:OpenReplay(game)
     local map = game.map or "Arena"
     frame.titleText:SetText("Replay: " .. result .. " vs " .. enemyComp .. " - " .. map)
 
-    -- Surface team MMR on the section labels. Only games recorded after MMR
-    -- tracking was added carry these values; older replays just show the label.
-    local function mmrTag(v)
-        return (v and v > 0) and ("  |cff888888MMR " .. v .. "|r") or ""
-    end
-    frame.friendlyLabel:SetText("FRIENDLY TEAM" .. mmrTag(game.mmrBefore))
-    frame.enemyLabel:SetText("ENEMY TEAM" .. mmrTag(game.enemyMMR))
-
     -- Reset filter chips
     frame.activeFilters = { all = true }
     for _, chip in ipairs(frame.filterChips) do
@@ -1782,15 +1684,6 @@ function addon:OpenReplay(game)
     frame.tickSearchBox:SetText("")
     frame.tickSearchBox.placeholder:Show()
     frame:UpdateLegend()
-
-    -- Start paused at t=0 and draw the initial frame explicitly. OnUpdate now
-    -- skips all work while the replay is idle, so the opening (paused) view won't
-    -- render on its own — we have to seed it here.
-    session:SeekTo(0)
-    session.status = "paused"
-    frame.refreshAccum = 0
-    frame.snapFeedPending = true
-    frame:RefreshUnitFrames()
 
     -- Build feed and markers
     frame:RefreshFeed()

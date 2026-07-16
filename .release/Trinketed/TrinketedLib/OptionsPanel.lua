@@ -43,11 +43,9 @@ local function BuildMasterFrame()
 
     table.insert(UISpecialFrames, "TrinketedOptionsFrame")
 
-    -- Close button. Raised above the content area so per-module widgets drawn
-    -- in the top-right corner (tab bars, reset/lock buttons) can't cover it.
+    -- Close button
     local closeBtn = CreateFrame("Button", nil, masterFrame, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", -3, -3)
-    closeBtn:SetFrameLevel(masterFrame:GetFrameLevel() + 50)
 
     ---------------------------------------------------------------------------
     -- Sidebar
