@@ -950,21 +950,6 @@ end
 ---------------------------------------------------------------------------
 -- Visual Effects
 ---------------------------------------------------------------------------
-function addon:UpdateActiveGlowColor()
-    local agc = self.db and self.db.general.activeGlowColor
-    local r, g, b = agc and agc.r or 0.3, agc and agc.g or 1, agc and agc.b or 0.3
-    for _, iconSet in pairs(self.icons) do
-        for _, icon in pairs(iconSet) do
-            if icon.agTop then
-                icon.agTop:SetColorTexture(r, g, b, 1)
-                icon.agBot:SetColorTexture(r, g, b, 1)
-                icon.agLeft:SetColorTexture(r, g, b, 1)
-                icon.agRight:SetColorTexture(r, g, b, 1)
-            end
-        end
-    end
-end
-
 function addon:PlayReadyGlow(icon)
     if not icon or not icon.glowAnim then return end
     icon.glowAnim:Stop()

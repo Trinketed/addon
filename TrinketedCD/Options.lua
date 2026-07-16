@@ -313,51 +313,6 @@ function addon:PopulateSettingsTab(parent)
         end)
     y = y - 28
 
-    -- Active glow color picker
-    local glowLabel = parent:CreateFontString(nil, "OVERLAY")
-    glowLabel:SetFont(addon.FONT_BODY, 11, "")
-    glowLabel:SetPoint("TOPLEFT", col1, y)
-    glowLabel:SetText("Active buff glow color")
-    glowLabel:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
-
-    local agc = self.db.general.activeGlowColor
-    local glowSwatch = CreateFrame("Button", nil, parent)
-    glowSwatch:SetPoint("TOPLEFT", col1 + 160, y + 3)
-    glowSwatch:SetSize(20, 14)
-
-    glowSwatch.bg = glowSwatch:CreateTexture(nil, "BACKGROUND")
-    glowSwatch.bg:SetAllPoints()
-    glowSwatch.bg:SetColorTexture(agc.r, agc.g, agc.b, 1)
-
-    glowSwatch.border = glowSwatch:CreateTexture(nil, "ARTWORK")
-    glowSwatch.border:SetPoint("TOPLEFT", -1, 1)
-    glowSwatch.border:SetPoint("BOTTOMRIGHT", 1, -1)
-    glowSwatch.border:SetColorTexture(0.4, 0.4, 0.4, 1)
-    glowSwatch.bg:SetDrawLayer("ARTWORK", 1)
-
-    glowSwatch:SetScript("OnClick", function()
-        local prev = { r = agc.r, g = agc.g, b = agc.b }
-        local function setColor()
-            local r, g, b = ColorPickerFrame:GetColorRGB()
-            agc.r, agc.g, agc.b = r, g, b
-            glowSwatch.bg:SetColorTexture(r, g, b, 1)
-            self:UpdateActiveGlowColor()
-        end
-        local function cancelColor()
-            agc.r, agc.g, agc.b = prev.r, prev.g, prev.b
-            glowSwatch.bg:SetColorTexture(prev.r, prev.g, prev.b, 1)
-            self:UpdateActiveGlowColor()
-        end
-        ColorPickerFrame:SetColorRGB(agc.r, agc.g, agc.b)
-        ColorPickerFrame.hasOpacity = false
-        ColorPickerFrame.func = setColor
-        ColorPickerFrame.cancelFunc = cancelColor
-        ColorPickerFrame:Hide()
-        ColorPickerFrame:Show()
-    end)
-
-    y = y - 34
-
     -- POSITION section
     y = lib:CreateSectionHeader(parent, y, "POSITION")
     y = y - 4

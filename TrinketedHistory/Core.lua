@@ -154,7 +154,6 @@ local hadPrepBuff = false
 local prevUnitState = {}     -- guid → signature string (delta-encoding)
 local prevAuraSnapshot = {}  -- guid → signature string (delta-encoding)
 local prevCooldownSig = nil  -- string signature of active cooldowns
-local needsReload = false    -- set after a game is saved, triggers reload on next queue
 local pendingSave = nil      -- set to "WIN"/"LOSS" when match ends, cleared after save
 local trinketLastStart = {}  -- GUID → last startTime from ARENA_COOLDOWNS_UPDATE (dedup)
 local lastTargets = {}       -- unit → targetGUID cache for change detection
@@ -1410,8 +1409,6 @@ local function SaveMatch(result)
     end
     print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. ratingStr .. mmrStr ..
         " | " .. eventCount .. " events | " .. string.format("%.1fs", currentMatch.duration))
-
-    needsReload = true
 
     ResetMatchState()
 end
@@ -4717,19 +4714,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
     -----------------------------------------------------------------
     elseif event == "UPDATE_BATTLEFIELD_STATUS" then
         UpdateOverlayVisibility()
-
-        -- Check if we just queued and have unsaved data — reload to persist
-        if needsReload and state == "IDLE" then
-            for i = 1, GetMaxBattlefieldID() do
-                local status = GetBattlefieldStatus(i)
-                if status == "queued" then
-                    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Queue detected — reloading UI to save data...")
-                    C_Timer.After(0.5, ReloadUI)
-                    needsReload = false
-                    return
-                end
-            end
-        end
 
         if state ~= "RECORDING" then return end
 
