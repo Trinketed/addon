@@ -1288,6 +1288,11 @@ local function StartRecording()
     print("|cff00ccff" .. DISPLAY_NAME .. ":|r Gates open — recording started (" .. rosterCount .. " players)")
 end
 
+-- Games recorded since login/reload — in memory only until SavedVariables
+-- flush, so this is exactly the count not yet on disk for web-app upload
+local unsyncedGames = 0
+local UpdateSyncNudge  -- defined with the Matches tab UI
+
 local function SaveMatch(result)
     if not currentMatch or not currentMatch.startTime then
         dbg("SaveMatch() aborted — no match data")
@@ -1351,12 +1356,14 @@ local function SaveMatch(result)
         end
     end
 
-    -- Per-player rating + MMR from scoreboard.
-    -- Legacy column order: ...rating(12) ratingChange(13) preMatchMMR(14) mmrChange(15)
+    -- Per-player rating + MMR + scoreboard stats.
+    -- Legacy column order: name(1) killingBlows(2) honorableKills(3) deaths(4)
+    -- ... damageDone(10) healingDone(11) rating(12) ratingChange(13)
+    -- preMatchMMR(14) mmrChange(15)
     if GetBattlefieldScore and GetNumBattlefieldScores then
         local numScores = GetNumBattlefieldScores() or 0
         for si = 1, numScores do
-            local name, _, _, _, _, _, _, _, _, _, _, _, ratingChange, preMatchMMR, mmrChange = GetBattlefieldScore(si)
+            local name, killingBlows, _, deaths, _, _, _, _, _, damageDone, healingDone, _, ratingChange, preMatchMMR, mmrChange = GetBattlefieldScore(si)
             if name then
                 local cleanName = StripRealm(name)
                 for guid, entry in pairs(currentMatch.roster) do
@@ -1366,6 +1373,10 @@ local function SaveMatch(result)
                             entry.mmr = math.floor(preMatchMMR + 0.5)
                             entry.mmrChange = math.floor((mmrChange or 0) + 0.5)
                         end
+                        entry.kbs = killingBlows
+                        entry.deaths = deaths
+                        entry.damage = damageDone
+                        entry.healing = healingDone
                     end
                 end
             end
@@ -1401,6 +1412,10 @@ local function SaveMatch(result)
             ratingChange = entry.ratingChange,
             mmr = entry.mmr,
             mmrChange = entry.mmrChange,
+            kbs = entry.kbs,
+            deaths = entry.deaths,
+            damage = entry.damage,
+            healing = entry.healing,
         }
         if entry.team == "friendly" then
             table.insert(friendlyTeam, p)
@@ -1471,6 +1486,9 @@ local function SaveMatch(result)
     end
     print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. ratingStr .. mmrStr ..
         " | " .. eventCount .. " events | " .. string.format("%.1fs", currentMatch.duration))
+
+    unsyncedGames = unsyncedGames + 1
+    if UpdateSyncNudge then UpdateSyncNudge() end
 
     ResetMatchState()
 end
@@ -2628,6 +2646,24 @@ resetBtn:SetScript("OnClick", function()
     seasonDD:SetLabel("|cffE8B923Season " .. currentSeason .. "|r")
     RefreshHistory()
 end)
+
+-- Sync nudge: games recorded this session live only in memory until a
+-- /reload or logout writes SavedVariables — remind before web-app upload
+local syncNudge = matchesContainer:CreateFontString(nil, "OVERLAY")
+syncNudge:SetFont(lib.FONT_BODY, 10, "")
+syncNudge:SetPoint("TOPRIGHT", -84, -16)
+syncNudge:SetJustifyH("RIGHT")
+syncNudge:Hide()
+
+UpdateSyncNudge = function()
+    if unsyncedGames > 0 then
+        syncNudge:SetText("|cffE8B923" .. unsyncedGames .. " game" ..
+            (unsyncedGames == 1 and "" or "s") .. " not on disk — /reload to sync|r")
+        syncNudge:Show()
+    else
+        syncNudge:Hide()
+    end
+end
 
 -- Show the Reset button only when at least one filter differs from the default
 -- (default = no comp/partner/etc. filters, and the current season).
@@ -4389,7 +4425,21 @@ function RefreshEnemies()
             local hl = row:CreateTexture(nil, "HIGHLIGHT")
             hl:SetAllPoints()
             hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+
+            -- Click an enemy to jump to the Matches tab filtered to games
+            -- against them (search box + all-seasons so nothing is hidden)
+            row:EnableMouse(true)
+            row:SetScript("OnMouseUp", function(self, button)
+                if button == "LeftButton" and self.enemyName then
+                    filters.season = nil
+                    seasonDD:SetLabel("Season: All")
+                    histSearchBox:SetText(self.enemyName)
+                    historyTabBar:SelectTab("matches")
+                end
+            end)
         end
+
+        row.enemyName = e.name
 
         row:SetPoint("TOPLEFT", 0, -totalHeight)
 
