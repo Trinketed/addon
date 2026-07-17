@@ -348,19 +348,46 @@ local function TrackQueueStatus()
             -- New queue in this slot (or a different queue shifted into it)
             if not entry or entry.mapName ~= mapName then
                 queueTracker[i] = { start = GetTime(), mapName = mapName, teamSize = teamSize }
+                dbg("queue slot", i, "queued:", tostring(mapName), "teamSize:", tostring(teamSize))
             end
         elseif status == "confirm" then
-            if entry and entry.mapName == mapName and not entry.popped then
+            if not entry then
+                -- Reloaded/logged in mid-queue: no local start stamp, but the
+                -- server-side wait time below still covers us
+                entry = { mapName = mapName, teamSize = teamSize }
+                queueTracker[i] = entry
+            end
+            if not entry.popped then
                 entry.popped = true
-                local label = mapName
-                if entry.teamSize and entry.teamSize > 0 then
+                -- Prefer the server-tracked wait (survives /reload); fall back
+                -- to our own stamp from when we saw the slot enter "queued"
+                local waited
+                if GetBattlefieldTimeWaited then
+                    local ms = GetBattlefieldTimeWaited(i)
+                    if type(ms) == "number" and ms > 0 then
+                        waited = ms / 1000
+                    end
+                end
+                if not waited and entry.start then
+                    waited = GetTime() - entry.start
+                end
+                local label = mapName or "Arena"
+                if type(entry.teamSize) == "number" and entry.teamSize >= 2 and entry.teamSize <= 10 then
                     label = entry.teamSize .. "v" .. entry.teamSize
                 end
-                print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. (label or "Arena") ..
-                    " queue popped after " .. FormatQueueTime(GetTime() - entry.start))
+                dbg("queue slot", i, "popped:", tostring(mapName), "waited:", tostring(waited))
+                if waited then
+                    print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. label ..
+                        " queue popped after " .. FormatQueueTime(waited))
+                else
+                    print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. label .. " queue popped")
+                end
             end
         else
             -- "none"/"active"/etc. — slot is no longer queued or confirming
+            if entry then
+                dbg("queue slot", i, "cleared, status:", tostring(status))
+            end
             queueTracker[i] = nil
         end
     end
