@@ -327,6 +327,46 @@ UpdateOverlayVisibility = function()
 end
 
 ---------------------------------------------------------------------------
+-- Queue pop timing — print how long the arena queue took to pop
+---------------------------------------------------------------------------
+local queueTracker = {}  -- battlefield index → { start, mapName, teamSize, popped }
+
+local function FormatQueueTime(seconds)
+    local m = math.floor(seconds / 60)
+    local s = math.floor(seconds % 60)
+    if m > 0 then
+        return string.format("%dm %02ds", m, s)
+    end
+    return string.format("%ds", s)
+end
+
+local function TrackQueueStatus()
+    for i = 1, GetMaxBattlefieldID() do
+        local status, mapName, teamSize = GetBattlefieldStatus(i)
+        local entry = queueTracker[i]
+        if status == "queued" then
+            -- New queue in this slot (or a different queue shifted into it)
+            if not entry or entry.mapName ~= mapName then
+                queueTracker[i] = { start = GetTime(), mapName = mapName, teamSize = teamSize }
+            end
+        elseif status == "confirm" then
+            if entry and entry.mapName == mapName and not entry.popped then
+                entry.popped = true
+                local label = mapName
+                if entry.teamSize and entry.teamSize > 0 then
+                    label = entry.teamSize .. "v" .. entry.teamSize
+                end
+                print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. (label or "Arena") ..
+                    " queue popped after " .. FormatQueueTime(GetTime() - entry.start))
+            end
+        else
+            -- "none"/"active"/etc. — slot is no longer queued or confirming
+            queueTracker[i] = nil
+        end
+    end
+end
+
+---------------------------------------------------------------------------
 -- Helpers
 ---------------------------------------------------------------------------
 local function FormatClassName(class)
@@ -4714,6 +4754,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
     -----------------------------------------------------------------
     elseif event == "UPDATE_BATTLEFIELD_STATUS" then
         UpdateOverlayVisibility()
+        TrackQueueStatus()
 
         if state ~= "RECORDING" then return end
 
