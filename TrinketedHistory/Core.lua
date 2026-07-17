@@ -2973,6 +2973,11 @@ local rowPool = {}
 -- game (that's what made scrolling lag). Instead we keep a small pool sized to
 -- the viewport and recycle rows as the list scrolls — same approach as the
 -- replay combat feed. State/methods live on one table to keep top-level locals down.
+-- Share/import feature table. Declared here (before the row factory) so row
+-- buttons can reference it at click time; functions live in the "Share /
+-- Import" section further down, after the JSON + LibDeflate helpers.
+local Share = {}
+
 local historyView = { filtered = nil }
 
 -- Create one pooled Matches row. The replay button reads row.game (set by
@@ -3049,9 +3054,11 @@ function historyView:MakeRow()
     row.mapStr:SetJustifyH("CENTER")
     row.mapStr:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
 
+    -- Replay + Share stack in the 50px action column (686-736), splitting the
+    -- 34px row height. Both read row.game (set by :Populate) so rows recycle.
     row.replayBtn = CreateFrame("Button", nil, row)
-    row.replayBtn:SetSize(50, 18)
-    row.replayBtn:SetPoint("LEFT", 686, 0)
+    row.replayBtn:SetSize(50, 15)
+    row.replayBtn:SetPoint("LEFT", 686, 8)
     row.replayBtn.bg = row.replayBtn:CreateTexture(nil, "BACKGROUND")
     row.replayBtn.bg:SetAllPoints()
     row.replayBtn.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
@@ -3075,6 +3082,31 @@ function historyView:MakeRow()
         if row.game and row.game.eventLog then
             lib:HideOptionsPanel()
             addon:OpenReplay(row.game)
+        end
+    end)
+
+    row.shareBtn = CreateFrame("Button", nil, row)
+    row.shareBtn:SetSize(50, 15)
+    row.shareBtn:SetPoint("LEFT", 686, -8)
+    row.shareBtn.bg = row.shareBtn:CreateTexture(nil, "BACKGROUND")
+    row.shareBtn.bg:SetAllPoints()
+    row.shareBtn.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
+    row.shareBtn.icon = row.shareBtn:CreateFontString(nil, "OVERLAY")
+    row.shareBtn.icon:SetFont(lib.FONT_BODY, 9, "")
+    row.shareBtn.icon:SetPoint("CENTER")
+    row.shareBtn.icon:SetText("Share")
+    row.shareBtn.icon:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    row.shareBtn:SetScript("OnEnter", function(self)
+        self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.3)
+        self.icon:SetTextColor(1, 1, 1)
+    end)
+    row.shareBtn:SetScript("OnLeave", function(self)
+        self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.15)
+        self.icon:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    end)
+    row.shareBtn:SetScript("OnClick", function()
+        if row.game and row.game.eventLog then
+            Share.ShowExport(row.game)
         end
     end)
 
@@ -3123,8 +3155,10 @@ function historyView:Populate(row, i, game)
 
     if game.eventLog then
         row.replayBtn:Show()
+        row.shareBtn:Show()
     else
         row.replayBtn:Hide()
+        row.shareBtn:Hide()
     end
 end
 
@@ -4734,6 +4768,273 @@ local function JSONToTable(str)
     return parseValue()
 end
 addon.JSONToTable = JSONToTable
+
+---------------------------------------------------------------------------
+-- Share / Import: export a match as a text string a teammate can import to
+-- watch the replay. Populates the Share table declared above the row factory.
+---------------------------------------------------------------------------
+do  -- wrap section: keeps its locals out of the main chunk's 200-local budget
+local SHARE_PREFIX = "TRINKR1!"
+local MAX_DECOMPRESSED = 20 * 1024 * 1024  -- refuse absurdly large payloads
+local IMPORT_MAX_LETTERS = 1000000         -- paste box cap (strings can be 100k+)
+local shareDialog
+
+local function ChatMsg(msg)
+    print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. msg)
+end
+
+-- Serialise a full game record (metadata + already-compressed eventLog string)
+-- into a printable share string.
+function Share.BuildString(game)
+    local json = TableToJSON({ v = 1, game = game })
+    local compressed = LibDeflate:CompressDeflate(json, { level = 9 })
+    if not compressed then
+        dbg("Share: compression failed")
+        return nil
+    end
+    local encoded = LibDeflate:EncodeForPrint(compressed)
+    if not encoded then
+        dbg("Share: encoding failed")
+        return nil
+    end
+    dbg("Share:", #json, "bytes JSON →", #encoded, "chars encoded")
+    return SHARE_PREFIX .. encoded
+end
+
+-- Decode a pasted share string back into a transient game record.
+-- Returns game on success, or nil + user-facing error message.
+function Share.Decode(text)
+    text = tostring(text or ""):gsub("%s+", "")  -- strip paste linebreaks/spaces
+    if text == "" then
+        return nil, "Paste a share string first."
+    end
+    if text:sub(1, #SHARE_PREFIX) ~= SHARE_PREFIX then
+        return nil, "Not a Trinketed match string (missing " .. SHARE_PREFIX .. " prefix)."
+    end
+    local compressed = LibDeflate:DecodeForPrint(text:sub(#SHARE_PREFIX + 1))
+    if not compressed then
+        return nil, "Could not decode the string — it may be truncated or corrupted."
+    end
+    local json = LibDeflate:DecompressDeflate(compressed)
+    if not json then
+        return nil, "Could not decompress the string — it may be truncated or corrupted."
+    end
+    if #json > MAX_DECOMPRESSED then
+        return nil, "Match data too large — refusing to import."
+    end
+    local ok, payload = pcall(JSONToTable, json)
+    if not ok or type(payload) ~= "table" then
+        return nil, "Could not parse the match data."
+    end
+    if payload.v ~= 1 then
+        return nil, "Unsupported share format version (" .. tostring(payload.v) .. ")."
+    end
+    local game = payload.game
+    if type(game) ~= "table" or type(game.eventLog) ~= "string" then
+        return nil, "The match data contains no replay log."
+    end
+    return game
+end
+
+local function GetShareDialog()
+    if shareDialog then return shareDialog end
+
+    local f = CreateFrame("Frame", "TrinketedHistoryShareDialog", UIParent, "BackdropTemplate")
+    f:SetSize(480, 300)
+    f:SetPoint("CENTER", 0, 60)
+    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1,
+    })
+    f:SetBackdropColor(C.frameBg[1], C.frameBg[2], C.frameBg[3], 0.97)
+    f:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3], 0.5)
+    f:Hide()
+
+    local title = f:CreateFontString(nil, "OVERLAY")
+    title:SetFont(lib.FONT_DISPLAY, 13, "")
+    title:SetPoint("TOPLEFT", 14, -12)
+    title:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    f.title = title
+
+    local inst = f:CreateFontString(nil, "OVERLAY")
+    inst:SetFont(lib.FONT_BODY, 10, "")
+    inst:SetPoint("TOPLEFT", 14, -30)
+    inst:SetPoint("TOPRIGHT", -14, -30)
+    inst:SetJustifyH("LEFT")
+    inst:SetWordWrap(false)
+    inst:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+    f.inst = inst
+
+    -- Dark backing behind the string box
+    local boxBg = f:CreateTexture(nil, "BACKGROUND", nil, 1)
+    boxBg:SetPoint("TOPLEFT", 12, -46)
+    boxBg:SetPoint("BOTTOMRIGHT", -12, 66)
+    boxBg:SetColorTexture(C.bgElevated[1], C.bgElevated[2], C.bgElevated[3], 1)
+
+    local scroll = CreateFrame("ScrollFrame", "TrinketedHistoryShareScroll", f, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", 16, -50)
+    scroll:SetPoint("BOTTOMRIGHT", -34, 70)
+
+    local editBox = CreateFrame("EditBox", "TrinketedHistoryShareEditBox", scroll)
+    editBox:SetMultiLine(true)
+    editBox:SetAutoFocus(false)
+    editBox:SetFont(lib.FONT_MONO, 10, "")
+    editBox:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+    editBox:SetWidth(414)
+    editBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    editBox:SetScript("OnChar", function(self)
+        -- Export strings are read-only: restore the string on any typed char
+        if f.mode == "export" and self.lockedText then
+            self:SetText(self.lockedText)
+            self:HighlightText()
+        end
+    end)
+    editBox:SetScript("OnEnterPressed", function()
+        if f.mode == "import" then Share.DoImport() end
+    end)
+    scroll:SetScrollChild(editBox)
+    f.editBox = editBox
+
+    local status = f:CreateFontString(nil, "OVERLAY")
+    status:SetFont(lib.FONT_BODY, 10, "")
+    status:SetPoint("BOTTOMLEFT", 14, 42)
+    status:SetPoint("BOTTOMRIGHT", -14, 42)
+    status:SetJustifyH("LEFT")
+    status:SetWordWrap(true)
+    status:SetText("")
+    f.status = status
+
+    -- Bottom buttons (frame is 300 tall; 24px buttons at y=-266 leave a 10px margin)
+    f.importBtn = lib:CreateButton(f, 14, -266, 120, "Import", function() Share.DoImport() end)
+    f.closeBtn = lib:CreateButton(f, 346, -266, 120, "Close", function() f:Hide() end)
+
+    -- Close (X)
+    local close = CreateFrame("Button", nil, f)
+    close:SetSize(20, 20)
+    close:SetPoint("TOPRIGHT", -6, -6)
+    local closeText = close:CreateFontString(nil, "OVERLAY")
+    closeText:SetFont(lib.FONT_BODY, 14, "")
+    closeText:SetPoint("CENTER", 0, 0)
+    closeText:SetText("x")
+    closeText:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    close:SetScript("OnClick", function() f:Hide() end)
+    close:SetScript("OnEnter", function()
+        closeText:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+    end)
+    close:SetScript("OnLeave", function()
+        closeText:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    end)
+
+    f:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            self:SetPropagateKeyboardInput(false)
+            self:Hide()
+        else
+            self:SetPropagateKeyboardInput(true)
+        end
+    end)
+
+    shareDialog = f
+    return f
+end
+
+function Share.ShowExport(game)
+    local str = Share.BuildString(game)
+    if not str then
+        ChatMsg("Could not build a share string for this match.")
+        return
+    end
+    local f = GetShareDialog()
+    f.mode = "export"
+    f.title:SetText("SHARE MATCH")
+    f.inst:SetText("Send this string to a teammate — they can watch it with /trinketed import.")
+    f.importBtn:Hide()
+    f.editBox:SetMaxLetters(0)
+    f.editBox.lockedText = str
+    f.editBox:SetText(str)
+    f.status:SetTextColor(C.statusSuccess[1], C.statusSuccess[2], C.statusSuccess[3])
+    f.status:SetText(string.format("%.0f KB share string. Press Ctrl+C to copy.", #str / 1024))
+    f:Show()
+    C_Timer.After(0.05, function()
+        if f:IsShown() and f.mode == "export" then
+            f.editBox:SetFocus()
+            f.editBox:HighlightText()
+        end
+    end)
+end
+
+function Share.ShowImport()
+    local f = GetShareDialog()
+    f.mode = "import"
+    f.title:SetText("IMPORT MATCH")
+    f.inst:SetText("Paste a " .. SHARE_PREFIX .. " string from a teammate, then click Import.")
+    f.importBtn:Show()
+    f.editBox.lockedText = nil
+    f.editBox:SetMaxLetters(IMPORT_MAX_LETTERS)
+    f.editBox:SetText("")
+    f.status:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    f.status:SetText("The imported match opens as a replay only — it is never added to your history or stats.")
+    f:Show()
+    f.editBox:SetFocus()
+end
+
+function Share.DoImport()
+    local f = shareDialog
+    if not f then return end
+    local game, err = Share.Decode(f.editBox:GetText())
+    if not game then
+        err = err or "Import failed."
+        f.status:SetTextColor(C.statusError[1], C.statusError[2], C.statusError[3])
+        f.status:SetText(err)
+        ChatMsg("Import failed: " .. err)
+        return
+    end
+    -- Transient record: intentionally NOT inserted into TrinketedHistoryDB.games
+    f.editBox:SetText("")
+    f:Hide()
+    lib:HideOptionsPanel()
+    local ok, openErr = pcall(addon.OpenReplay, addon, game)
+    if not ok then
+        ChatMsg("Could not open the imported replay: " .. tostring(openErr))
+        dbg("Share import OpenReplay error:", tostring(openErr))
+    else
+        ChatMsg("Match imported — opening replay (not added to your history).")
+    end
+end
+
+-- Slash commands (registered here, like the scoreboard section, so the
+-- handlers can see this section's locals)
+lib:RegisterSubCommand("share", function(args)
+    local games = TrinketedHistoryDB and TrinketedHistoryDB.games
+    if not games or #games == 0 then
+        ChatMsg("No recorded matches to share.")
+        return
+    end
+    local n = tonumber((args or ""):match("%d+")) or #games  -- default: latest
+    local game = games[n]
+    if not game then
+        ChatMsg("No match #" .. n .. " — you have " .. #games .. " recorded matches.")
+        return
+    end
+    if not game.eventLog then
+        ChatMsg("Match #" .. n .. " has no replay log to share.")
+        return
+    end
+    Share.ShowExport(game)
+end)
+
+lib:RegisterSubCommand("import", function()
+    Share.ShowImport()
+end)
+
+end  -- Share / Import section
 
 ---------------------------------------------------------------------------
 -- Event Handler

@@ -129,6 +129,274 @@ local CAT_COLORS = {
 }
 
 ---------------------------------------------------------------------------
+-- Death Recap: clicking a death row in the feed opens a compact panel with
+-- the victim's final seconds — HP% (from the 200ms unit_state polls) beside
+-- every hit, heal, aura and defensive cast involving them, ending at the
+-- death. All state lives in this one table; the frame and its line
+-- FontStrings are built once and reused across opens.
+---------------------------------------------------------------------------
+local recap = {
+    WINDOW = 8,      -- seconds shown before the death
+    ROW_H = 14,
+    MAX_LINES = 80,  -- hard cap on pooled line FontStrings
+    -- Display labels for SpellDB categories.
+    CAT_LABELS = {
+        offensive_cd = "offensive CD", defensive_cd = "defensive",
+        healing_cd = "healing CD", cc_break = "CC break", trinket = "trinket",
+        mobility = "mobility", racial = "racial", interrupt = "interrupt",
+        dispel = "dispel", utility = "utility",
+    },
+    -- SpellDB categories worth surfacing when the victim casts them (their
+    -- own reactions to the kill attempt).
+    SELF_CAST_CATS = {
+        defensive_cd = true, cc_break = true, trinket = true,
+        healing_cd = true, mobility = true, racial = true,
+    },
+}
+
+-- Category tag for a spellID: DRList CC category first (stun/silence/etc.),
+-- then SpellDB category label.
+function recap:SpellTag(spellID)
+    if not spellID then return nil end
+    if DRList then
+        local drCat = DRList:GetCategoryBySpellID(spellID)
+        if drCat then return drCat end
+    end
+    local db = SPELL_DB and SPELL_DB[spellID]
+    if db and db.cat then return self.CAT_LABELS[db.cat] or db.cat end
+    return nil
+end
+
+-- HP% column text at time t from the collected samples, colored by severity.
+function recap:HPStr(samples, t)
+    local pct
+    for i = 1, #samples do
+        if samples[i].t <= t then pct = samples[i].pct else break end
+    end
+    if not pct then return "|cff555555 ??%|r" end
+    local hex
+    if pct > 0.5 then hex = "55ff55"
+    elseif pct > 0.2 then hex = "ffd24d"
+    else hex = "ff5555" end
+    return string.format("|cff%s%3d%%|r", hex, math.floor(pct * 100 + 0.5))
+end
+
+-- Build the display lines for the victim's final WINDOW seconds. Single pass
+-- over the raw (time-ordered) event list: victim HP is tracked from the start
+-- so the window opens with the last known HP even if the first in-window poll
+-- comes late; everything targeting the victim (plus their own notable casts)
+-- inside the window becomes a line. Returns an array of formatted strings.
+function recap:BuildLines(victimGUID, deathTime)
+    if not (session and session.parsed) then return {} end
+    local roster = session.parsed.roster or {}
+    local windowStart = deathTime - self.WINDOW
+
+    local function nameStr(name, guid)
+        local info = guid and roster[guid]
+        return ClassColorStr(info and info.class) .. (name or "?") .. "|r"
+    end
+
+    local samples = {}          -- victim HP polls inside the window { t, pct }
+    local hp, hpMax, prePct     -- running victim HP; prePct = last pct before window
+    local entries = {}          -- { t, text } in event order
+
+    for _, ev in ipairs(session.parsed.events) do
+        if ev.t > deathTime then break end
+        local ty = ev.type
+        if ty == "unit_state" then
+            if ev.guid == victimGUID then
+                if ev.hp then hp = ev.hp end
+                if ev.hpMax then hpMax = ev.hpMax end
+                if hp and hpMax and hpMax > 0 then
+                    if ev.t >= windowStart then
+                        samples[#samples + 1] = { t = ev.t, pct = hp / hpMax }
+                    else
+                        prePct = hp / hpMax
+                    end
+                end
+            end
+        elseif ev.t >= windowStart then
+            local text
+            if ty == "damage" and ev.dstGUID == victimGUID then
+                local spellName = ev.spell
+                if ev.subtype == "auto_melee" then spellName = "Melee"
+                elseif ev.subtype == "auto_ranged" then spellName = "Auto Shot"
+                elseif ev.subtype == "env" then spellName = ev.envType or "Environment" end
+                local amt = AbbrevNumber(ev.amount)
+                if ev.critical then amt = amt .. "*" end
+                text = nameStr(ev.src, ev.srcGUID) .. "  |cffff4d4d" .. (spellName or "?") .. "  -" .. amt .. "|r"
+            elseif ty == "heal" and ev.dstGUID == victimGUID then
+                local eff = (ev.amount or 0) - (ev.overhealing or 0)
+                if eff > 0 then
+                    local amt = AbbrevNumber(eff)
+                    if ev.critical then amt = amt .. "*" end
+                    text = nameStr(ev.src, ev.srcGUID) .. "  |cff4dff4d" .. (ev.spell or "?") .. "  +" .. amt .. "|r"
+                end
+            elseif ty == "absorb" and ev.dstGUID == victimGUID then
+                text = nameStr(ev.src, ev.srcGUID) .. "  |cffffff66" .. (ev.spell or "?") .. "  " .. AbbrevNumber(ev.amount) .. " abs|r"
+            elseif ty == "miss" and ev.dstGUID == victimGUID then
+                text = nameStr(ev.src, ev.srcGUID) .. "  |cff888888" .. (ev.spell or "Melee") .. "  " .. (ev.missType or "MISS") .. "|r"
+            elseif ty == "aura_applied" and ev.dstGUID == victimGUID then
+                local prefix = (ev.auraType == "DEBUFF") and "|cffff8080+" or "|cff80ff80+"
+                text = prefix .. (ev.spell or "?") .. "|r"
+                local tag = self:SpellTag(ev.spellID)
+                if tag then text = text .. " |cff888888[" .. tag .. "]|r" end
+                if ev.src then text = nameStr(ev.src, ev.srcGUID) .. "  " .. text end
+            elseif ty == "aura_break" and ev.dstGUID == victimGUID then
+                text = "|cffff8800" .. (ev.spell or "?") .. " broken|r"
+                if ev.extraSpell then text = text .. " |cff888888(by " .. ev.extraSpell .. ")|r" end
+            elseif (ty == "dispel" or ty == "steal") and ev.dstGUID == victimGUID then
+                local verb = ty == "steal" and "stole" or "dispelled"
+                text = nameStr(ev.src, ev.srcGUID) .. "  |cffa855f7" .. verb .. " " .. (ev.extraSpell or "?") .. "|r"
+            elseif ty == "interrupt" and ev.dstGUID == victimGUID then
+                text = nameStr(ev.src, ev.srcGUID) .. "  |cffff5533interrupted"
+                if ev.extraSpell then text = text .. " (" .. ev.extraSpell .. ")" end
+                text = text .. "|r"
+            elseif ty == "cast_success" and ev.srcGUID == victimGUID then
+                local db = ev.spellID and SPELL_DB and SPELL_DB[ev.spellID]
+                if db and self.SELF_CAST_CATS[db.cat] then
+                    text = nameStr(ev.src, ev.srcGUID) .. "  |cff4dd2ffused " .. (ev.spell or "?") .. "|r"
+                        .. " |cff888888[" .. (self.CAT_LABELS[db.cat] or db.cat) .. "]|r"
+                end
+            elseif ty == "death" and ev.dstGUID == victimGUID then
+                text = "|cffff0000DEATH|r  " .. nameStr(ev.dst, ev.dstGUID)
+            end
+            if text then
+                entries[#entries + 1] = { t = ev.t, text = text }
+            end
+        end
+    end
+
+    if prePct then
+        table.insert(samples, 1, { t = windowStart, pct = prePct })
+    end
+
+    -- Keep only the newest MAX_LINES entries (the ones closest to the death).
+    if #entries > self.MAX_LINES then
+        local trimmed = {}
+        for i = #entries - self.MAX_LINES + 1, #entries do
+            trimmed[#trimmed + 1] = entries[i]
+        end
+        entries = trimmed
+    end
+
+    -- Compose final strings: relative time + HP% column + event text.
+    local lines = {}
+    for _, e in ipairs(entries) do
+        lines[#lines + 1] = string.format("|cff888888%5.1fs|r %s  %s",
+            e.t - deathTime, self:HPStr(samples, e.t), e.text)
+    end
+    if #lines == 0 then
+        lines[1] = "|cff888888No recorded events in the final " .. self.WINDOW .. "s.|r"
+    end
+    return lines
+end
+
+-- Lazily build the recap panel (once). Parented to the replay window so it
+-- hides with it; ESC closes it via UISpecialFrames.
+function recap:EnsureFrame()
+    if self.frame then return self.frame end
+    local f = CreateFrame("Frame", "TrinketedDeathRecapFrame", replayFrame, "BackdropTemplate")
+    f:SetSize(360, 300)
+    f:SetPoint("TOPRIGHT", replayFrame.feedPanel, "TOPLEFT", -4, 0)
+    f:SetFrameLevel(replayFrame.feedPanel:GetFrameLevel() + 10)
+    f:EnableMouse(true)
+    f:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeSize = 1,
+    })
+    f:SetBackdropColor(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], C.bgRaised[4] or 1)
+    f:SetBackdropBorderColor(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], C.borderDefault[4] or 1)
+    f:Hide()
+    tinsert(UISpecialFrames, "TrinketedDeathRecapFrame")
+
+    f.title = f:CreateFontString(nil, "OVERLAY")
+    f.title:SetFont(lib.FONT_DISPLAY, 11, "")
+    f.title:SetPoint("TOPLEFT", 8, -7)
+    f.title:SetWidth(360 - 32)
+    f.title:SetJustifyH("LEFT")
+    f.title:SetWordWrap(false)
+    f.title:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+
+    f.closeBtn = CreateFrame("Button", nil, f)
+    f.closeBtn:SetSize(16, 16)
+    f.closeBtn:SetPoint("TOPRIGHT", -4, -4)
+    f.closeBtn.label = f.closeBtn:CreateFontString(nil, "OVERLAY")
+    f.closeBtn.label:SetFont(lib.FONT_MONO, 11, "")
+    f.closeBtn.label:SetPoint("CENTER")
+    f.closeBtn.label:SetText("x")
+    f.closeBtn.label:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    f.closeBtn:SetScript("OnEnter", function(self)
+        self.label:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    end)
+    f.closeBtn:SetScript("OnLeave", function(self)
+        self.label:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    end)
+    f.closeBtn:SetScript("OnClick", function() f:Hide() end)
+
+    f.scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+    f.scroll:SetPoint("TOPLEFT", 6, -26)
+    f.scroll:SetPoint("BOTTOMRIGHT", -26, 6)
+    f.content = CreateFrame("Frame", nil, f.scroll)
+    f.content:SetWidth(360 - 34)
+    f.content:SetHeight(1)
+    f.scroll:SetScrollChild(f.content)
+
+    self.rows = {}
+    self.frame = f
+    return f
+end
+
+-- Open (or repopulate — only one recap at a time) for a feed death event.
+-- Purely read-only over the event list; never touches playback state.
+function recap:Open(deathEv)
+    if not (session and session.parsed) then return end
+    local victimGUID = deathEv.dstGUID
+    if not victimGUID then
+        -- Fallback: resolve the victim by name from the roster.
+        for guid, info in pairs(session.parsed.roster or {}) do
+            if info.name == deathEv.dstName then victimGUID = guid; break end
+        end
+    end
+    if not victimGUID then return end
+
+    local f = self:EnsureFrame()
+    f.title:SetText("Death Recap |cff888888—|r "
+        .. ClassColorStr(deathEv.dstClass) .. (deathEv.dstName or "?") .. "|r"
+        .. "  |cff888888" .. FormatTimeTenths(deathEv.time) .. "|r")
+
+    local lines = self:BuildLines(victimGUID, deathEv.time)
+    for i, text in ipairs(lines) do
+        local row = self.rows[i]
+        if not row then
+            row = f.content:CreateFontString(nil, "OVERLAY")
+            row:SetFont(lib.FONT_MONO, 9, "")
+            row:SetPoint("TOPLEFT", 2, -((i - 1) * self.ROW_H))
+            row:SetWidth(f.content:GetWidth() - 4)
+            row:SetJustifyH("LEFT")
+            row:SetWordWrap(false)
+            self.rows[i] = row
+        end
+        row:SetText(text)
+        row:Show()
+    end
+    for i = #lines + 1, #self.rows do
+        self.rows[i]:Hide()
+    end
+
+    local totalH = #lines * self.ROW_H
+    f.content:SetHeight(math.max(totalH, 1))
+    f:Show()
+    -- Chronological, ending at the death: start scrolled to the bottom.
+    f.scroll:SetVerticalScroll(math.max(0, totalH - (f.scroll:GetHeight() or 0)))
+end
+
+function recap:Close()
+    if self.frame then self.frame:Hide() end
+end
+
+---------------------------------------------------------------------------
 -- Create a single unit frame
 ---------------------------------------------------------------------------
 local function CreateUnitFrame(parent, yOffset)
@@ -1409,9 +1677,32 @@ local function CreateReplayFrame()
 
         row:SetScript("OnClick", function()
             if session and row.ev then
+                -- Death rows additionally open the Death Recap panel for the
+                -- victim; the seek still happens so the replay lands on the kill.
+                if row.ev.cat == "death" then
+                    recap:Open(row.ev)
+                end
                 session:SeekTo(row.ev.time)
                 session.status = "paused"
                 frame.snapFeedPending = true
+            end
+        end)
+
+        -- Hover affordance for death rows (the only rows with a special click
+        -- action): red tint + tooltip. Other rows keep their plain seek click.
+        row:SetScript("OnEnter", function(self)
+            if self.ev and self.ev.cat == "death" then
+                self.bg:SetColorTexture(CAT_COLORS.death.r, CAT_COLORS.death.g, CAT_COLORS.death.b, 0.15)
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText("Death Recap")
+                GameTooltip:AddLine("Click to review the final seconds before this death.", 0.6, 0.6, 0.6)
+                GameTooltip:Show()
+            end
+        end)
+        row:SetScript("OnLeave", function(self)
+            if self.ev and self.ev.cat == "death" then
+                GameTooltip:Hide()
+                self.bg:SetColorTexture(self.bgR or 0, self.bgG or 0, self.bgB or 0, self.bgA or 0)
             end
         end)
 
@@ -1447,7 +1738,7 @@ local function CreateReplayFrame()
             row.srcText:SetText("")
             row.spellText:SetText("|cffff0000DEATH|r")
             row.iconBtn:Hide()
-            row.detailText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r")
+            row.detailText:SetText(ClassColorStr(ev.dstClass) .. (ev.dstName or "?") .. "|r  |cff707070» recap|r")
 
         elseif ev.type == "damage" then
             row.srcText:SetText(ClassColorStr(ev.srcClass) .. (ev.srcName or "?") .. "|r")
@@ -1598,11 +1889,14 @@ local function CreateReplayFrame()
                 row.iconBtn:SetAlpha(a)
                 row.spellText:SetAlpha(a)
                 row.detailText:SetAlpha(a)
+                -- Remember the base bg so the death-row hover highlight can
+                -- restore it on OnLeave.
                 if lastPastIdx and idx == lastPastIdx then
-                    row.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.1)
+                    row.bgR, row.bgG, row.bgB, row.bgA = C.accent[1], C.accent[2], C.accent[3], 0.1
                 else
-                    row.bg:SetColorTexture(0, 0, 0, 0)
+                    row.bgR, row.bgG, row.bgB, row.bgA = 0, 0, 0, 0
                 end
+                row.bg:SetColorTexture(row.bgR, row.bgG, row.bgB, row.bgA)
                 row:Show()
             elseif row then
                 row:Hide()
@@ -1711,6 +2005,10 @@ function addon:OpenReplay(game)
         session:Destroy()
         session = nil
     end
+
+    -- A recap left open from a previous replay would otherwise reappear with
+    -- the window (child frames keep their shown state through a parent hide).
+    recap:Close()
 
     -- Reset speed
     speedIndex = 2

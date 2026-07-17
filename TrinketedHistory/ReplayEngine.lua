@@ -472,6 +472,9 @@ local function BuildFeedEvents(parsedData)
                 time = ev.t, type = "death", cat = "death",
                 dstName = ev.dst or (ev.dstGUID and guidToName[ev.dstGUID]),
                 dstClass = ev.dstGUID and guidToClass[ev.dstGUID],
+                -- GUID kept so the UI's Death Recap can match the victim
+                -- against raw events (unit_state polls, damage, auras).
+                dstGUID = ev.dstGUID,
             })
 
         elseif evType == "damage" then
