@@ -5308,6 +5308,7 @@ local settingsBuilt = false
 
 lib:RegisterSubAddon("History", {
     order = 2,
+    desc = "Match history, session and team stats, enemy tracking, and full match replays.",
     OnSelect = function(contentFrame)
         -- Build settings tab content on first open (after SavedVariables are loaded)
         if not settingsBuilt then

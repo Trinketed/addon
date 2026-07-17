@@ -12,9 +12,9 @@ externals:
 move-folders:
   Trinketed/TrinketedCD: TrinketedCD
   Trinketed/TrinketedHistory: TrinketedHistory
-  Trinketed/TrinketedAuras: TrinketedAuras
-  Trinketed/TrinketedLC: TrinketedLC
 
+# Local-only modules: in the repo (and loaded on dev machines) but kept out
+# of the packaged CurseForge build until they're ready to ship.
 ignore:
   - .github
   - docs
@@ -23,4 +23,6 @@ ignore:
   - .claude
   - "*.md"
   - .gitignore
+  - TrinketedAuras
+  - TrinketedLC
   - TrinketedLOS

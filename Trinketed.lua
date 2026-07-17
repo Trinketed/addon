@@ -34,35 +34,33 @@ lib:RegisterSubAddon("Welcome", {
         desc:SetText("Arena PvP toolkit for World of Warcraft. Track cooldowns, record match history, and analyze your performance.")
         desc:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
 
-        -- Modules section
+        -- Modules section — built from the registry, so it always matches
+        -- the modules actually installed and loaded on this install
         local y = -120
         y = lib:CreateSectionHeader(contentFrame, y, "MODULES", lib:GetContentWidth() - 48)
 
-        local cdTitle = contentFrame:CreateFontString(nil, "OVERLAY")
-        cdTitle:SetFont(lib.FONT_BODY, 12, "")
-        cdTitle:SetPoint("TOPLEFT", 16, y)
-        cdTitle:SetText("|cffF4F4F5Cooldowns|r")
+        local anchor
+        for _, entry in ipairs(lib:GetSortedSubAddons()) do
+            if entry.name ~= "Welcome" then
+                local mTitle = contentFrame:CreateFontString(nil, "OVERLAY")
+                mTitle:SetFont(lib.FONT_BODY, 12, "")
+                if anchor then
+                    mTitle:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -12)
+                else
+                    mTitle:SetPoint("TOPLEFT", 16, y)
+                end
+                mTitle:SetText("|cffF4F4F5" .. entry.name .. "|r")
 
-        local cdDesc = contentFrame:CreateFontString(nil, "OVERLAY")
-        cdDesc:SetFont(lib.FONT_BODY, 11, "")
-        cdDesc:SetPoint("TOPLEFT", cdTitle, "BOTTOMLEFT", 0, -2)
-        cdDesc:SetWidth(lib:GetContentWidth() - 64)
-        cdDesc:SetJustifyH("LEFT")
-        cdDesc:SetText("Real-time arena cooldown tracker with customizable bars and alerts.")
-        cdDesc:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-
-        local histTitle = contentFrame:CreateFontString(nil, "OVERLAY")
-        histTitle:SetFont(lib.FONT_BODY, 12, "")
-        histTitle:SetPoint("TOPLEFT", cdDesc, "BOTTOMLEFT", 0, -12)
-        histTitle:SetText("|cffF4F4F5History|r")
-
-        local histDesc = contentFrame:CreateFontString(nil, "OVERLAY")
-        histDesc:SetFont(lib.FONT_BODY, 11, "")
-        histDesc:SetPoint("TOPLEFT", histTitle, "BOTTOMLEFT", 0, -2)
-        histDesc:SetWidth(lib:GetContentWidth() - 64)
-        histDesc:SetJustifyH("LEFT")
-        histDesc:SetText("Match history and session breakdown with rating tracking, team stats, and data export.")
-        histDesc:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+                local mDesc = contentFrame:CreateFontString(nil, "OVERLAY")
+                mDesc:SetFont(lib.FONT_BODY, 11, "")
+                mDesc:SetPoint("TOPLEFT", mTitle, "BOTTOMLEFT", 0, -2)
+                mDesc:SetWidth(lib:GetContentWidth() - 64)
+                mDesc:SetJustifyH("LEFT")
+                mDesc:SetText(entry.desc or "")
+                mDesc:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+                anchor = mDesc
+            end
+        end
     end,
 })
 

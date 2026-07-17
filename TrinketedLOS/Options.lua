@@ -17,6 +17,7 @@ local CW = function() return lib:GetContentWidth() end
 function addon:InitOptions()
     lib:RegisterSubAddon("Line of Sight", {
         order = 5,
+        desc = "Alerts allies when your heals fail because they are out of line of sight. (Experimental)",
         OnSelect = function(contentFrame)
             addon:BuildOptionsContent(contentFrame)
         end,

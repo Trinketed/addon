@@ -20,6 +20,7 @@ local scrollCounter = 0
 function addon:InitOptions()
     lib:RegisterSubAddon("Auras", {
         order = 4,
+        desc = "Configurable icon groups that track your own buffs and debuffs.",
         OnSelect = function(contentFrame)
             addon:BuildOptionsContent(contentFrame)
         end,

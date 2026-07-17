@@ -20,6 +20,7 @@ local gridBuilderState = {
 function addon:InitOptions()
     lib:RegisterSubAddon("Cooldowns", {
         order = 1,
+        desc = "Real-time arena cooldown tracker with customizable bars and alerts.",
         OnSelect = function(contentFrame)
             addon:BuildOptionsContent(contentFrame)
         end,

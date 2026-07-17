@@ -16,6 +16,7 @@ local CW = function() return lib:GetContentWidth() end
 function addon:InitOptions()
     lib:RegisterSubAddon("Lose Control", {
         order = 3,
+        desc = "On-screen alerts when you are crowd-controlled, silenced, or interrupted.",
         OnSelect = function(contentFrame)
             addon:BuildOptionsContent(contentFrame)
         end,
