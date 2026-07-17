@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Trinketed Log Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Consolas', 'Monaco', monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+  h1 { color: #e8b923; margin-bottom: 10px; font-size: 22px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+
+  .input-section { margin-bottom: 20px; }
+  .input-section label { display: block; color: #e8b923; margin-bottom: 6px; font-size: 13px; }
+  textarea { width: 100%; height: 120px; background: #0f0f23; color: #ccc; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: inherit; font-size: 12px; resize: vertical; }
+  .btn { background: #e8b923; color: #1a1a2e; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; margin-right: 8px; margin-top: 8px; }
+  .btn:hover { background: #f0c83a; }
+  .btn-secondary { background: #333; color: #ccc; }
+  .btn-secondary:hover { background: #444; }
+
+  .search-bar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+  .search-bar input { flex: 1; background: #0f0f23; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 8px 12px; font-family: inherit; font-size: 13px; }
+  .search-bar input::placeholder { color: #555; }
+  .search-bar select { background: #0f0f23; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: inherit; font-size: 13px; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+  .tab { padding: 6px 16px; background: #222; color: #888; border: 1px solid #333; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 13px; }
+  .tab.active { background: #2a2a3e; color: #e8b923; border-color: #e8b923; }
+  .tab .count { color: #666; font-size: 11px; margin-left: 4px; }
+  .tab.active .count { color: #b89a1a; }
+
+  .game-selector { margin-bottom: 16px; }
+  .game-selector select { background: #0f0f23; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; padding: 8px; font-family: inherit; font-size: 13px; min-width: 400px; }
+  .game-selector label { color: #e8b923; margin-right: 8px; font-size: 13px; }
+
+  .game-meta { background: #0f0f23; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-bottom: 16px; display: flex; gap: 24px; flex-wrap: wrap; font-size: 13px; }
+  .game-meta .field { }
+  .game-meta .label { color: #888; }
+  .game-meta .value { color: #e0e0e0; }
+  .game-meta .win { color: #00ff00; }
+  .game-meta .loss { color: #ff4444; }
+
+  .roster { background: #0f0f23; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-bottom: 4px; }
+  .roster h3 { color: #e8b923; font-size: 13px; margin-bottom: 8px; }
+  .roster-grid { display: flex; gap: 24px; }
+  .roster-team { flex: 1; }
+  .roster-team h4 { color: #888; font-size: 12px; margin-bottom: 4px; }
+  .roster-entry { font-size: 12px; padding: 2px 0; }
+
+  .log-container { background: #0f0f23; border: 1px solid #333; border-radius: 4px; max-height: 600px; overflow-y: auto; }
+  .log-row { padding: 3px 10px; font-size: 12px; border-bottom: 1px solid #1a1a2e; display: flex; gap: 8px; line-height: 1.5; }
+  .log-row:hover { background: #1a1a3e; }
+  .log-row .ts { color: #666; min-width: 90px; flex-shrink: 0; }
+  .log-row .event-type { min-width: 180px; flex-shrink: 0; }
+  .log-row .detail { flex: 1; word-break: break-all; }
+
+  .dmg { color: #ff6666; } .heal { color: #66ff66; } .aura-apply { color: #6699ff; }
+  .aura-remove { color: #996633; } .cast { color: #cc99ff; } .interrupt { color: #ff9900; }
+  .death { color: #ff0000; font-weight: bold; } .cc { color: #ff66cc; } .dispel { color: #66cccc; }
+
+  .stats { color: #888; font-size: 12px; margin-bottom: 8px; }
+  .empty { color: #555; padding: 40px; text-align: center; }
+
+  .c-Warrior { color: #C69B6D; } .c-Paladin { color: #F48CBA; } .c-Hunter { color: #AAD372; }
+  .c-Rogue { color: #FFF468; } .c-Priest { color: #FFFFFF; } .c-Shaman { color: #0070DD; }
+  .c-Mage { color: #3FC7EB; } .c-Warlock { color: #8788EE; } .c-Druid { color: #FF7C0A; }
+  .c-DeathKnight { color: #C41E3A; }
+  pre { padding: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<h1>Trinketed Log Viewer</h1>
+<p class="subtitle">Paste your TrinketedHistory.lua SavedVariables file to inspect eventLog data.</p>
+
+<div class="input-section">
+  <label>Paste TrinketedHistory.lua contents:</label>
+  <textarea id="input" placeholder='TrinketedHistoryDB = { ["games"] = { ...'></textarea>
+  <button class="btn" id="parseBtn">Parse</button>
+  <button class="btn btn-secondary" id="loadBtn">Load File</button>
+  <input type="file" id="fileInput" style="display:none" accept=".lua">
+</div>
+
+<div id="viewer" style="display:none">
+  <div class="game-selector">
+    <label>Game:</label>
+    <select id="gamePicker"></select>
+  </div>
+
+  <div id="gameMeta" class="game-meta"></div>
+
+  <div class="tabs" id="tabBar"></div>
+
+  <div class="search-bar">
+    <input id="search" type="text" placeholder="Search events... (spell name, player, event type)">
+    <select id="eventFilter"></select>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <div class="log-container" id="logContainer"></div>
+</div>
+
+<script>
+// LibDeflate EncodeForPrint alphabet: a-z A-Z 0-9 ( )
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789()';
+const CHAR_TO_6BIT = {};
+for (let i = 0; i < 64; i++) CHAR_TO_6BIT[ALPHABET.charCodeAt(i)] = i;
+
+function decodeForPrint(str) {
+  str = str.trim();
+  const len = str.length;
+  const fullGroups = Math.floor(len / 4);
+  const remainder = len % 4;
+  const bytes = [];
+  let i = 0;
+  for (let g = 0; g < fullGroups; g++) {
+    const b1 = CHAR_TO_6BIT[str.charCodeAt(i++)];
+    const b2 = CHAR_TO_6BIT[str.charCodeAt(i++)];
+    const b3 = CHAR_TO_6BIT[str.charCodeAt(i++)];
+    const b4 = CHAR_TO_6BIT[str.charCodeAt(i++)];
+    if (b1 === undefined || b2 === undefined || b3 === undefined || b4 === undefined) return null;
+    const cache = b1 + b2 * 64 + b3 * 4096 + b4 * 262144;
+    bytes.push(cache & 0xFF, (cache >> 8) & 0xFF, (cache >> 16) & 0xFF);
+  }
+  if (remainder > 0) {
+    let cache = 0;
+    let bits = 0;
+    for (let r = 0; r < remainder; r++) {
+      const b = CHAR_TO_6BIT[str.charCodeAt(i++)];
+      if (b === undefined) return null;
+      cache += b * Math.pow(64, r);
+      bits += 6;
+    }
+    while (bits >= 8) {
+      bytes.push(cache & 0xFF);
+      cache = Math.floor(cache / 256);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+async function decompressLog(encoded) {
+  if (!encoded || typeof encoded !== 'string') return null;
+  const compressed = decodeForPrint(encoded);
+  if (!compressed) return null;
+  const deflated = compressed.slice(2, -4);
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+  writer.write(deflated);
+  writer.close();
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const blob = new Blob(chunks);
+  let text = await blob.text();
+  // Strip \0 (CLEU_NIL sentinel) that gameLog uses for nil placeholders
+  text = text.replace(/\0/g, '');
+  // Replace standalone \0 encoded as literal string in JSON (e.g. "\u0000")
+  text = text.replace(/\\u0000/g, '');
+  return JSON.parse(text);
+}
+
+function parseLua(str) {
+  // Strip the assignment: TrinketedHistoryDB = { ... }
+  const eq = str.indexOf('=');
+  if (eq !== -1) str = str.slice(eq + 1);
+  str = str.trim();
+  let pos = 0;
+
+  function skipWS() {
+    while (pos < str.length) {
+      if (str[pos] === '-' && str[pos + 1] === '-') {
+        // skip Lua comment
+        if (str[pos + 2] === '[' && str[pos + 3] === '[') {
+          pos = str.indexOf(']]', pos + 4);
+          pos = pos === -1 ? str.length : pos + 2;
+        } else {
+          while (pos < str.length && str[pos] !== '\n') pos++;
+        }
+      } else if (str[pos] <= ' ') {
+        pos++;
+      } else break;
+    }
+  }
+
+  function parseString() {
+    const quote = str[pos]; pos++;
+    let result = '';
+    while (pos < str.length) {
+      const ch = str[pos];
+      if (ch === quote) { pos++; return result; }
+      if (ch === '\\') {
+        pos++;
+        const esc = str[pos]; pos++;
+        if (esc === 'n') result += '\n';
+        else if (esc === 't') result += '\t';
+        else if (esc === '\\') result += '\\';
+        else if (esc === quote) result += quote;
+        else result += esc;
+      } else {
+        result += ch; pos++;
+      }
+    }
+    return result;
+  }
+
+  function parseNumber() {
+    const start = pos;
+    if (str[pos] === '-') pos++;
+    if (str[pos] === '0' && (str[pos + 1] === 'x' || str[pos + 1] === 'X')) {
+      pos += 2;
+      while (pos < str.length && /[0-9a-fA-F]/.test(str[pos])) pos++;
+    } else {
+      while (pos < str.length && str[pos] >= '0' && str[pos] <= '9') pos++;
+      if (pos < str.length && str[pos] === '.') {
+        pos++;
+        while (pos < str.length && str[pos] >= '0' && str[pos] <= '9') pos++;
+      }
+      if (pos < str.length && (str[pos] === 'e' || str[pos] === 'E')) {
+        pos++;
+        if (str[pos] === '+' || str[pos] === '-') pos++;
+        while (pos < str.length && str[pos] >= '0' && str[pos] <= '9') pos++;
+      }
+    }
+    return Number(str.slice(start, pos));
+  }
+
+  function parseIdent() {
+    const start = pos;
+    while (pos < str.length && /[a-zA-Z0-9_]/.test(str[pos])) pos++;
+    return str.slice(start, pos);
+  }
+
+  function parseValue() {
+    skipWS();
+    const ch = str[pos];
+    if (ch === '{') return parseTable();
+    if (ch === '"' || ch === "'") return parseString();
+    if (ch === '-' || (ch >= '0' && ch <= '9')) return parseNumber();
+    // keyword or bare identifier
+    if (/[a-zA-Z_]/.test(ch)) {
+      const word = parseIdent();
+      if (word === 'true') return true;
+      if (word === 'false') return false;
+      if (word === 'nil') return null;
+      return word; // bare identifier as string
+    }
+    throw new Error('Unexpected at pos ' + pos + ': "' + str.slice(pos, pos + 20) + '"');
+  }
+
+  // Peek whether the current position has a key followed by = (bracketed or bare ident)
+  function isKeyAssignment() {
+    const saved = pos;
+    skipWS();
+    let found = false;
+    if (str[pos] === '[') {
+      // Find matching ]
+      let depth = 1; let p = pos + 1;
+      while (p < str.length && depth > 0) {
+        if (str[p] === '[') depth++;
+        else if (str[p] === ']') depth--;
+        p++;
+      }
+      // After ] should be whitespace then =
+      while (p < str.length && str[p] <= ' ') p++;
+      found = str[p] === '=';
+    } else if (/[a-zA-Z_]/.test(str[pos])) {
+      let p = pos;
+      while (p < str.length && /[a-zA-Z0-9_]/.test(str[p])) p++;
+      while (p < str.length && str[p] <= ' ') p++;
+      found = str[p] === '=';
+    }
+    pos = saved;
+    return found;
+  }
+
+  function parseTable() {
+    pos++; // skip {
+    skipWS();
+    if (str[pos] === '}') { pos++; return []; }
+
+    // Collect all entries, tracking whether any have explicit keys
+    const entries = [];
+    let hasKeys = false;
+    let hasArray = false;
+
+    while (true) {
+      skipWS();
+      if (str[pos] === '}') { pos++; break; }
+
+      if (isKeyAssignment()) {
+        hasKeys = true;
+        let key;
+        if (str[pos] === '[') {
+          pos++; // skip [
+          skipWS();
+          key = parseValue();
+          skipWS();
+          pos++; // skip ]
+        } else {
+          key = parseIdent();
+        }
+        skipWS();
+        pos++; // skip =
+        const val = parseValue();
+        entries.push({ key: key, value: val });
+      } else {
+        hasArray = true;
+        const val = parseValue();
+        entries.push({ key: null, value: val });
+      }
+
+      skipWS();
+      if (str[pos] === ',') pos++;
+      else if (str[pos] === ';') pos++;
+    }
+
+    // If all entries are unkeyed, return an array
+    if (!hasKeys) {
+      return entries.map(function(e) { return e.value; });
+    }
+
+    // Otherwise return an object; unkeyed entries get numeric indices starting at 1
+    const obj = {};
+    let autoIdx = 1;
+    for (const e of entries) {
+      if (e.key === null) {
+        obj[autoIdx] = e.value;
+        autoIdx++;
+      } else {
+        obj[e.key] = e.value;
+      }
+    }
+    return obj;
+  }
+
+  return parseValue();
+}
+
+
+let games = [];
+let currentGame = null;
+let currentTab = 'eventlog';
+let decodedEventLog = null;
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = String(s);
+  return div.innerHTML;
+}
+
+function classSpan(name, className) {
+  const span = document.createElement('span');
+  span.className = 'c-' + className;
+  span.textContent = name;
+  return span.outerHTML;
+}
+
+document.getElementById('parseBtn').addEventListener('click', parseInput);
+document.getElementById('loadBtn').addEventListener('click', function() { document.getElementById('fileInput').click(); });
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    document.getElementById('input').value = ev.target.result;
+    parseInput();
+  };
+  reader.readAsText(file);
+});
+document.getElementById('gamePicker').addEventListener('change', selectGame);
+document.getElementById('search').addEventListener('input', renderLog);
+document.getElementById('eventFilter').addEventListener('change', renderLog);
+
+function parseInput() {
+  const raw = document.getElementById('input').value.trim();
+  if (!raw) return;
+  let db;
+  try {
+    db = parseLua(raw);
+    games = db.games || [];
+    if (!Array.isArray(games)) {
+      const arr = [];
+      for (const k of Object.keys(games)) arr.push(games[k]);
+      games = arr;
+    }
+  } catch (e) {
+    alert('Parse error: ' + e.message);
+    return;
+  }
+
+  const picker = document.getElementById('gamePicker');
+  picker.textContent = '';
+  games.forEach(function(g, i) {
+    const opt = document.createElement('option');
+    const d = g.startTime ? new Date(g.startTime * 1000) : null;
+    const dateStr = d ? d.toLocaleDateString() + ' ' + d.toLocaleTimeString() : '?';
+    const comp = (g.enemyComp || []).join('/');
+    const hasEL = g.eventLog ? ' [EL]' : '';
+    opt.value = i;
+    opt.textContent = '#' + (i + 1) + ' \u2014 ' + (g.result || '?') + ' vs ' + comp + ' \u2014 ' + (g.map || '?') + ' \u2014 ' + dateStr + hasEL;
+    picker.appendChild(opt);
+  });
+  if (games.length > 0) picker.value = games.length - 1;
+  document.getElementById('viewer').style.display = 'block';
+  selectGame();
+}
+
+async function selectGame() {
+  const idx = parseInt(document.getElementById('gamePicker').value);
+  currentGame = games[idx];
+  if (!currentGame) return;
+
+  const meta = document.getElementById('gameMeta');
+  meta.textContent = '';
+  const d = currentGame.startTime ? new Date(currentGame.startTime * 1000) : null;
+  const duration = (currentGame.startTime && currentGame.endTime) ? (currentGame.endTime - currentGame.startTime) : null;
+
+  function addField(label, value, cls) {
+    const div = document.createElement('div');
+    div.className = 'field';
+    const lbl = document.createElement('span');
+    lbl.className = 'label';
+    lbl.textContent = label + ': ';
+    const val = document.createElement('span');
+    val.className = 'value' + (cls ? ' ' + cls : '');
+    val.textContent = value;
+    div.appendChild(lbl);
+    div.appendChild(val);
+    meta.appendChild(div);
+  }
+
+  addField('Result', currentGame.result || '?', currentGame.result === 'WIN' ? 'win' : 'loss');
+  addField('Map', currentGame.map || '?');
+  addField('Duration', duration ? duration + 's' : '?');
+  addField('Time', d ? d.toLocaleString() : '?');
+  if (currentGame.ratingChange) {
+    const sign = currentGame.ratingChange >= 0 ? '+' : '';
+    addField('Rating', (currentGame.ratingBefore || '?') + ' \u2192 ' + (currentGame.ratingAfter || '?') + ' (' + sign + currentGame.ratingChange + ')');
+  }
+  const friendly = (currentGame.friendlyTeam || []).map(function(p) { return p.name + ' (' + (p.spec || p.class) + ')'; }).join(', ');
+  const enemy = (currentGame.enemyTeam || []).map(function(p) { return p.name + ' (' + (p.spec || p.class) + ')'; }).join(', ');
+  addField('Friendly', friendly);
+  addField('Enemy', enemy);
+
+  decodedEventLog = null;
+  if (currentGame.eventLog) {
+    try { decodedEventLog = await decompressLog(currentGame.eventLog); } catch (e) { console.error('eventLog decode:', e); }
+  }
+
+  buildTabs();
+  populateFilters();
+  renderLog();
+}
+
+function buildTabs() {
+  const bar = document.getElementById('tabBar');
+  bar.textContent = '';
+  const tabs = [
+    { key: 'eventlog', label: 'eventLog', count: decodedEventLog ? (decodedEventLog.events || []).length : 0 },
+    { key: 'raw', label: 'Raw JSON', count: null },
+  ];
+  tabs.forEach(function(t) {
+    const div = document.createElement('div');
+    div.className = 'tab' + (t.key === currentTab ? ' active' : '');
+    div.dataset.tab = t.key;
+    div.textContent = t.label + ' ';
+    if (t.count !== null) {
+      const span = document.createElement('span');
+      span.className = 'count';
+      span.textContent = t.count > 0 ? '(' + t.count + ')' : '(none)';
+      div.appendChild(span);
+    }
+    div.addEventListener('click', function() { switchTab(t.key); });
+    bar.appendChild(div);
+  });
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.toggle('active', t.dataset.tab === tab); });
+  populateFilters();
+  renderLog();
+}
+
+function populateFilters() {
+  const select = document.getElementById('eventFilter');
+  select.textContent = '';
+  const allOpt = document.createElement('option');
+  allOpt.value = '';
+  allOpt.textContent = 'All Events';
+  select.appendChild(allOpt);
+
+  if (decodedEventLog) {
+    const types = new Set();
+    (decodedEventLog.events || []).forEach(function(ev) { if (ev.type) types.add(ev.type); });
+    Array.from(types).sort().forEach(function(t) {
+      const opt = document.createElement('option');
+      opt.value = t;
+      opt.textContent = t;
+      select.appendChild(opt);
+    });
+  }
+}
+
+// --- New format: keyed tables (ArenaBlackBox style) ---
+
+const POWER_NAMES = { 0: 'Mana', 1: 'Rage', 2: 'Focus', 3: 'Energy', 6: 'Runic' };
+
+function rosterNameByGuid(log, guid) {
+  if (!guid) return '';
+  const entry = log.roster && log.roster[guid];
+  if (entry && typeof entry === 'object' && entry.name) return classSpan(entry.name, entry.class || '');
+  return '';
+}
+
+function playerName(ev, field, guidField, log) {
+  // Try roster lookup by GUID first, fall back to the name field
+  if (guidField && ev[guidField] && log.roster) {
+    const r = rosterNameByGuid(log, ev[guidField]);
+    if (r) return r;
+  }
+  return ev[field] ? escapeHtml(ev[field]) : '';
+}
+
+function spellStr(ev) {
+  if (!ev.spell && !ev.spellID) return '';
+  return escapeHtml(ev.spell || '') + (ev.spellID ? ' (' + ev.spellID + ')' : '');
+}
+
+function formatEventRow(ev, log) {
+  const type = ev.type || '?';
+  const ts = '+' + (ev.t || 0).toFixed(2) + 's';
+  let cssClass = '';
+  let detail = '';
+
+  const src = function() { return playerName(ev, 'src', 'srcGUID', log); };
+  const dst = function() { return playerName(ev, 'dst', 'dstGUID', log); };
+  const nameOrDst = function() { return playerName(ev, 'name', 'guid', log) || dst(); };
+
+  switch (type) {
+    case 'damage':
+      cssClass = 'dmg';
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev)
+        + (ev.subtype ? ' [' + ev.subtype + ']' : '')
+        + ' ' + (ev.amount || 0)
+        + (ev.overkill > 0 ? ' (' + ev.overkill + ' overkill)' : '')
+        + (ev.absorbed > 0 ? ' (' + ev.absorbed + ' absorbed)' : '')
+        + (ev.critical ? ' CRIT' : '');
+      break;
+    case 'heal':
+      cssClass = 'heal';
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev)
+        + (ev.subtype ? ' [' + ev.subtype + ']' : '')
+        + ' +' + (ev.amount || 0)
+        + (ev.overhealing > 0 ? ' (' + ev.overhealing + ' overheal)' : '')
+        + (ev.critical ? ' CRIT' : '');
+      break;
+    case 'miss':
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev) + ' ' + (ev.missType || '?');
+      break;
+    case 'cast_start':
+    case 'cast_success':
+      cssClass = 'cast';
+      detail = src() + (ev.dst ? ' \u2192 ' + dst() : '') + ' ' + spellStr(ev);
+      break;
+    case 'cast_fail':
+      detail = src() + ' ' + spellStr(ev) + ' \u2014 failed (' + escapeHtml(ev.failReason || '?') + ')';
+      break;
+    case 'unit_state': {
+      const hpMax = ev.hpMax || 1;
+      const pct = Math.round((ev.hp || 0) / hpMax * 100);
+      const pwrName = POWER_NAMES[ev.powerType] || ev.powerType;
+      const tgt = ev.target ? escapeHtml(ev.target) : '';
+      detail = nameOrDst() + ' HP:' + (ev.hp||0) + '/' + hpMax + ' (' + pct + '%) '
+        + pwrName + ':' + (ev.power||0) + '/' + (ev.powerMax||0)
+        + (tgt ? ' target\u2192' + tgt : '')
+        + (ev.casting ? ' casting:' + escapeHtml(ev.casting) : '');
+      break;
+    }
+    case 'aura_applied':
+      cssClass = ev.dr ? 'cc' : 'aura-apply';
+      detail = src() + ' \u2192 ' + dst() + ' +' + spellStr(ev)
+        + ' [' + (ev.auraType || '') + ']'
+        + (ev.dr ? ' DR:' + ev.dr : '')
+        + (ev.dur ? ' ' + ev.dur + 's' : '');
+      break;
+    case 'aura_removed':
+      cssClass = 'aura-remove';
+      detail = dst() + ' -' + spellStr(ev) + ' [' + (ev.auraType || '') + ']';
+      break;
+    case 'aura_refresh':
+      cssClass = 'aura-apply';
+      detail = dst() + ' \u21bb' + spellStr(ev);
+      break;
+    case 'aura_dose':
+      detail = dst() + ' ' + spellStr(ev) + ' stacks\u2192' + (ev.stacks || '?');
+      break;
+    case 'aura_break':
+      cssClass = 'cc';
+      detail = dst() + ' ' + spellStr(ev) + ' broken'
+        + (ev.extraSpell ? ' by ' + src() + ' ' + escapeHtml(ev.extraSpell) + (ev.extraSpellID ? ' (' + ev.extraSpellID + ')' : '') : '');
+      break;
+    case 'interrupt':
+      cssClass = 'interrupt';
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev)
+        + ' interrupted ' + (ev.extraSpell ? escapeHtml(ev.extraSpell) + (ev.extraSpellID ? ' (' + ev.extraSpellID + ')' : '') : '');
+      break;
+    case 'dispel':
+      cssClass = 'dispel';
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev)
+        + ' dispelled ' + (ev.extraSpell ? escapeHtml(ev.extraSpell) : '')
+        + (ev.auraType ? ' [' + ev.auraType + ']' : '');
+      break;
+    case 'steal':
+      cssClass = 'dispel';
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev)
+        + ' stole ' + (ev.extraSpell ? escapeHtml(ev.extraSpell) : '');
+      break;
+    case 'absorb':
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev) + ' absorbed ' + (ev.amount || 0);
+      break;
+    case 'energize':
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev) + ' +' + (ev.amount || 0) + ' ' + (POWER_NAMES[ev.powerType] || ev.powerType || '');
+      break;
+    case 'drain':
+      detail = src() + ' \u2192 ' + dst() + ' ' + spellStr(ev) + ' -' + (ev.amount || 0) + ' ' + (POWER_NAMES[ev.powerType] || ev.powerType || '');
+      break;
+    case 'death':
+      cssClass = 'death';
+      detail = dst() + ' DIED';
+      break;
+    case 'summon':
+      detail = src() + ' summoned ' + dst() + ' \u2014 ' + spellStr(ev);
+      break;
+    case 'extra_attacks':
+      detail = src() + ' ' + spellStr(ev) + ' x' + (ev.amount || 0);
+      break;
+    case 'aura_snapshot': {
+      const auraList = ev.auras || [];
+      if (Array.isArray(auraList) && auraList.length > 0) {
+        const parts = auraList.map(function(a) {
+          return escapeHtml(a.spell || '') + (a.spellID ? '(' + a.spellID + ')' : '')
+            + '[' + (a.auraType || '') + ']'
+            + (a.stacks > 1 ? 'x' + a.stacks : '')
+            + (a.dr ? ' DR:' + a.dr : '');
+        });
+        detail = nameOrDst() + ' auras: ' + parts.join(', ');
+      } else {
+        detail = nameOrDst() + ' auras: none';
+      }
+      break;
+    }
+    default:
+      detail = escapeHtml(JSON.stringify(ev));
+  }
+
+  return { ts: ts, typeName: type, detail: detail, cssClass: cssClass };
+}
+
+function renderLog() {
+  const container = document.getElementById('logContainer');
+  const statsEl = document.getElementById('stats');
+  const search = document.getElementById('search').value.toLowerCase();
+  const typeFilter = document.getElementById('eventFilter').value;
+
+  container.textContent = '';
+  statsEl.textContent = '';
+
+  if (currentTab === 'raw') {
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(decodedEventLog, null, 2);
+    container.appendChild(pre);
+    return;
+  }
+
+  if (!decodedEventLog || !decodedEventLog.events) {
+    const div = document.createElement('div');
+    div.className = 'empty';
+    div.textContent = 'No eventLog data for this game.';
+    container.appendChild(div);
+    return;
+  }
+  renderEventLog(decodedEventLog, search, typeFilter, container, statsEl);
+}
+
+function buildRosterEl(log) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'roster';
+  const h3 = document.createElement('h3');
+  h3.textContent = 'Roster';
+  wrapper.appendChild(h3);
+  const grid = document.createElement('div');
+  grid.className = 'roster-grid';
+
+  const friendlyDiv = document.createElement('div');
+  friendlyDiv.className = 'roster-team';
+  const fh4 = document.createElement('h4');
+  fh4.textContent = 'Friendly';
+  friendlyDiv.appendChild(fh4);
+
+  const enemyDiv = document.createElement('div');
+  enemyDiv.className = 'roster-team';
+  const eh4 = document.createElement('h4');
+  eh4.textContent = 'Enemy';
+  enemyDiv.appendChild(eh4);
+
+  for (const guid of Object.keys(log.roster)) {
+    const entry = log.roster[guid];
+    if (!entry || typeof entry !== 'object') continue;
+    const row = document.createElement('div');
+    row.className = 'roster-entry';
+    const span = document.createElement('span');
+    span.className = 'c-' + (entry.class || '');
+    span.textContent = entry.name || '?';
+    row.appendChild(span);
+    row.appendChild(document.createTextNode(' \u2014 ' + (entry.class || '?') + (entry.spec ? ' (' + entry.spec + ')' : '') + ' [' + (entry.race || '?') + ']'));
+    if (entry.team === 'friendly') friendlyDiv.appendChild(row);
+    else enemyDiv.appendChild(row);
+  }
+
+  grid.appendChild(friendlyDiv);
+  grid.appendChild(enemyDiv);
+  wrapper.appendChild(grid);
+  return wrapper;
+}
+
+function makeLogRow(ts, typeName, detail, cssClass) {
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  const tsSpan = document.createElement('span');
+  tsSpan.className = 'ts';
+  tsSpan.textContent = ts;
+  const typeSpan = document.createElement('span');
+  typeSpan.className = 'event-type ' + cssClass;
+  typeSpan.textContent = typeName;
+  const detailSpan = document.createElement('span');
+  detailSpan.className = 'detail ' + cssClass;
+  // Detail may contain class-colored spans from rosterName, so use innerHTML
+  // but all dynamic text within has been escaped via escapeHtml/classSpan
+  detailSpan.innerHTML = detail;
+  row.appendChild(tsSpan);
+  row.appendChild(typeSpan);
+  row.appendChild(detailSpan);
+  return row;
+}
+
+function renderEventLog(log, search, typeFilter, container, statsEl) {
+  const frag = document.createDocumentFragment();
+  let shown = 0;
+  const total = log.events.length;
+
+  if (log.roster) frag.appendChild(buildRosterEl(log));
+
+  for (const ev of log.events) {
+    if (typeFilter && ev.type !== typeFilter) continue;
+    const row = formatEventRow(ev, log);
+    const text = (row.typeName + ' ' + row.detail).toLowerCase();
+    if (search && !text.includes(search)) continue;
+    shown++;
+    frag.appendChild(makeLogRow(row.ts, row.typeName, row.detail, row.cssClass));
+  }
+
+  if (shown === 0) {
+    const div = document.createElement('div');
+    div.className = 'empty';
+    div.textContent = 'No matching events.';
+    frag.appendChild(div);
+  }
+  container.appendChild(frag);
+  statsEl.textContent = 'Showing ' + shown + ' of ' + total + ' events';
+}
+
+</script>
+</body>
+</html>

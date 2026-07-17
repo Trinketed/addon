@@ -5,6 +5,9 @@ externals:
   Libs/LibDeflate:
     url: https://github.com/SafeteeWoW/LibDeflate
     tag: latest
+  Libs/DRList-1.0:
+    url: https://github.com/wardz/DRList-1.0
+    tag: latest
 
 move-folders:
   Trinketed/TrinketedCD: TrinketedCD

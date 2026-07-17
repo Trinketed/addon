@@ -179,12 +179,12 @@ function lib:SelectSubAddon(name)
     if not entry.contentFrame then
         entry.contentFrame = CreateFrame("Frame", nil, contentArea)
         entry.contentFrame:SetAllPoints(contentArea)
+        entry.contentFrame:Hide()
         if entry.OnSelect then
             entry.OnSelect(entry.contentFrame)
         end
-    else
-        entry.contentFrame:Show()
     end
+    entry.contentFrame:Show()
 
     activeSubAddon = entry
 end
@@ -204,6 +204,10 @@ end
 function lib:ShowOptionsPanel(subAddonName)
     BuildMasterFrame()
     PopulateSidebar()
+    -- Show the master frame before selecting, so the content frame's
+    -- Show() actually fires OnShow handlers (they don't fire while the
+    -- parent chain is hidden) — modules rely on OnShow to refresh data.
+    masterFrame:Show()
 
     if subAddonName and self.subAddons[subAddonName] then
         self:SelectSubAddon(subAddonName)
@@ -213,8 +217,6 @@ function lib:ShowOptionsPanel(subAddonName)
             self:SelectSubAddon(sorted[1].name)
         end
     end
-
-    masterFrame:Show()
 end
 
 function lib:HideOptionsPanel()

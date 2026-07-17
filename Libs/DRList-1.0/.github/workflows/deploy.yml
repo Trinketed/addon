@@ -1,0 +1,55 @@
+on:
+  push:
+    tags:
+      - "v*"
+      - "!**-alpha**"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Luacheck tests
+        uses: nebularg/actions-luacheck@v1
+        with:
+          args: --quiet
+
+      - name: Run personal tests
+        run: |
+          set -e
+          for file in DRList-1.0/tests/test-*.lua; do
+            lua "$file" || exit 1
+          done
+          lua DRList-1.0/tests/test-retail.lua -frFR
+          lua DRList-1.0/tests/test-classic.lua -deDE
+
+      - name: Check if lib minor versions matches
+        run: |
+          version_file1=$(sed -n 's/local MAJOR, MINOR = "DRList-1.0", \(.*\)--.*/\1/p' DRList-1.0/DRList-1.0.lua)
+          version_file2=$(sed -n 's/local MAJOR, MINOR = "DRList-1.0", \(.*\)--.*/\1/p' DRList-1.0/Spells.lua)
+          if [ "$version_file1" != "$version_file2" ]; then
+            echo "::error::DRList-1.0.lua minor version does not match Spells.lua version."
+            exit 1
+          fi
+
+      - name: Generate docs with LDoc
+        uses: lunarmodules/ldoc@v1.5.0
+        with:
+          args: DRList-1.0/DRList-1.0.lua
+
+      - name: Create and deploy packages
+        uses: BigWigsMods/packager@v2
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
+
+      - name: Deploy ldocs to Github Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: doc

@@ -1,0 +1,40 @@
+name: Luacheck Analyze & Lint
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - main
+      - master
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+
+      - name: Install and run Luacheck
+        uses: nebularg/actions-luacheck@v1
+        with:
+          args: --quiet
+
+      - name: Run personal tests
+        run: |
+          set -e
+          for file in DRList-1.0/tests/test-*.lua; do
+            lua "$file" || exit 1
+          done
+          lua DRList-1.0/tests/test-retail.lua -frFR
+          lua DRList-1.0/tests/test-classic.lua -deDE
+
+      - name: Check if lib minor versions matches
+        run: |
+          version_file1=$(sed -n 's/local MAJOR, MINOR = "DRList-1.0", \(.*\)--.*/\1/p' DRList-1.0/DRList-1.0.lua)
+          version_file2=$(sed -n 's/local MAJOR, MINOR = "DRList-1.0", \(.*\)--.*/\1/p' DRList-1.0/Spells.lua)
+          if [ "$version_file1" != "$version_file2" ]; then
+            echo "::error::DRList-1.0.lua minor version does not match Spells.lua version."
+            exit 1
+          fi
