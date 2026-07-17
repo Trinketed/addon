@@ -348,7 +348,6 @@ local function TrackQueueStatus()
             -- New queue in this slot (or a different queue shifted into it)
             if not entry or entry.mapName ~= mapName then
                 queueTracker[i] = { start = GetTime(), mapName = mapName, teamSize = teamSize }
-                dbg("queue slot", i, "queued:", tostring(mapName), "teamSize:", tostring(teamSize))
             end
         elseif status == "confirm" then
             if not entry then
@@ -375,7 +374,6 @@ local function TrackQueueStatus()
                 if type(entry.teamSize) == "number" and entry.teamSize >= 2 and entry.teamSize <= 10 then
                     label = entry.teamSize .. "v" .. entry.teamSize
                 end
-                dbg("queue slot", i, "popped:", tostring(mapName), "waited:", tostring(waited))
                 if waited then
                     print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. label ..
                         " queue popped after " .. FormatQueueTime(waited))
@@ -385,9 +383,6 @@ local function TrackQueueStatus()
             end
         else
             -- "none"/"active"/etc. — slot is no longer queued or confirming
-            if entry then
-                dbg("queue slot", i, "cleared, status:", tostring(status))
-            end
             queueTracker[i] = nil
         end
     end
