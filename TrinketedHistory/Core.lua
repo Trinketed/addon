@@ -1489,6 +1489,7 @@ local filters = {
     result = nil,
     bracket = "All",      -- "All" | "2v2" | "3v3" | "5v5"
     season = currentSeason,
+    search = "",          -- free-text: space-separated terms, all must match
 }
 
 -- Build a sorted slash-separated comp string from a team table
@@ -1786,6 +1787,10 @@ local function ComputeEnemies(games, bracketFilter, seasonFilter)
     return enemies
 end
 
+-- Weak-keyed so entries vanish with their game records; never stored on the
+-- game table itself (that would persist search text into SavedVariables)
+local searchTextCache = setmetatable({}, { __mode = "k" })
+
 local function GameMatchesFilters(game)
     if filters.result and game.result ~= filters.result then
         return false
@@ -1835,6 +1840,28 @@ local function GameMatchesFilters(game)
     -- Season filter (single-select)
     if filters.season and (game.season or 1) ~= filters.season then
         return false
+    end
+    -- Free-text search: every space-separated term must match a player
+    -- name/class/spec/race on either team, or the map (case-insensitive)
+    if filters.search ~= "" then
+        local hay = searchTextCache[game]
+        if not hay then
+            local parts = {}
+            local function add(v)
+                if type(v) == "string" then parts[#parts + 1] = v end
+            end
+            for _, team in ipairs({ game.friendlyTeam or {}, game.enemyTeam or {} }) do
+                for _, p in ipairs(team) do
+                    add(p.name); add(p.class); add(p.spec); add(p.race)
+                end
+            end
+            add(game.map); add(game.bracket)
+            hay = table.concat(parts, " "):lower()
+            searchTextCache[game] = hay
+        end
+        for term in filters.search:gmatch("%S+") do
+            if not hay:find(term, 1, true) then return false end
+        end
     end
     return true
 end
@@ -2517,6 +2544,41 @@ local seasonDD = CreateSearchableDropdown(matchesContainer, "TkSeasonDD", 120, {
 })
 seasonDD.frame:SetPoint("TOPLEFT", 627, -36)
 
+---------------------------------------------------------------------------
+-- Filter Row 3: free-text search
+---------------------------------------------------------------------------
+local histSearchBox = CreateFrame("EditBox", "TkHistSearchBox", matchesContainer, "BackdropTemplate")
+histSearchBox:SetSize(280, 22)
+histSearchBox:SetPoint("TOPLEFT", 12, -62)
+histSearchBox:SetFont(lib.FONT_BODY, 11, "")
+histSearchBox:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+histSearchBox:SetAutoFocus(false)
+histSearchBox:SetBackdrop({
+    bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+    edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+    edgeSize = 1,
+})
+histSearchBox:SetBackdropColor(0, 0, 0, 0.4)
+histSearchBox:SetBackdropBorderColor(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+histSearchBox:SetTextInsets(6, 6, 0, 0)
+
+histSearchBox.placeholder = histSearchBox:CreateFontString(nil, "ARTWORK")
+histSearchBox.placeholder:SetFont(lib.FONT_BODY, 11, "")
+histSearchBox.placeholder:SetPoint("LEFT", 6, 0)
+histSearchBox.placeholder:SetText("Search players, class, race, map...")
+histSearchBox.placeholder:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+histSearchBox:SetScript("OnTextChanged", function(self)
+    local text = self:GetText()
+    filters.search = text and text:lower() or ""
+    self.placeholder:SetShown(filters.search == "")
+    if RefreshHistory then RefreshHistory() end
+end)
+histSearchBox:SetScript("OnEscapePressed", function(self)
+    self:SetText("")
+    self:ClearFocus()
+end)
+
 -- Reset button (positioned from the right, in row 1)
 local resetBtn = CreateFrame("Button", nil, matchesContainer)
 resetBtn:SetSize(60, 24)
@@ -2554,6 +2616,7 @@ resetBtn:SetScript("OnClick", function()
     filters.result = nil
     filters.bracket = "All"
     filters.season = currentSeason
+    histSearchBox:SetText("")
     friendlyCompDD:SetLabel("Player Comp: All")
     partnerDD:SetLabel("Partner: All")
     enemyCompDD:SetLabel("Enemy Comp: All")
@@ -2574,13 +2637,13 @@ local function UpdateResetButton()
         next(filters.enemyComps) or next(filters.enemyPlayers) or
         next(filters.enemyRaces) or next(filters.maps) or
         filters.result ~= nil or filters.bracket ~= "All" or
-        filters.season ~= currentSeason
+        filters.season ~= currentSeason or filters.search ~= ""
     resetBtn:SetShown(active and true or false)
 end
 UpdateResetButton()
 
 -- Column headers
-local headerY = -66
+local headerY = -92
 local headers = {
     { text = "#",        x = 4,   w = 18, justify = "RIGHT" },
     { text = "Result",   x = 24,  w = 28, justify = "LEFT" },
