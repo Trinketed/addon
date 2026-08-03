@@ -419,6 +419,14 @@ local function GetRelativeTime()
     return GetTime() - gatesOpenTime
 end
 
+-- Random per-game id so external tools (the desktop companion app) can
+-- identify a record without decoding its eventLog. Uniqueness, not
+-- cryptography.
+local function GenerateGameId()
+    return string.format("%08x-%04x-%04x-%04x",
+        time(), math.random(0, 0xFFFF), math.random(0, 0xFFFF), math.random(0, 0xFFFF))
+end
+
 local function IsRelevantGUID(guid)
     return guid and relevantGUIDs[guid]
 end
@@ -509,8 +517,29 @@ local function AddToRoster(guid, name, class, race, team, unit)
         end
     end
 
+    -- Realm-qualified name: CLEU names arrive as "Name-Realm" for
+    -- cross-realm players already; unit-based names need the realm appended
+    -- (UnitName's second return cross-realm, own realm otherwise). Stripped
+    -- names collide across realms, so external tools need this to identify
+    -- players without decoding GUIDs out of the eventLog.
+    local fullName = name
+    if fullName and not fullName:find("-", 1, true) then
+        local realm
+        if unit then
+            local _, unitRealm = UnitName(unit)
+            realm = unitRealm
+        end
+        if not realm or realm == "" then
+            realm = GetNormalizedRealmName and GetNormalizedRealmName() or nil
+        end
+        if realm and realm ~= "" then
+            fullName = fullName .. "-" .. realm
+        end
+    end
+
     local entry = {
         name = StripRealm(name),
+        fullName = fullName,
         class = FormatClassName(class),
         race = race,
         spec = specName,
@@ -1258,6 +1287,12 @@ local function StartRecording()
     state = "RECORDING"
     gatesOpenTime = GetTime()
     currentMatch.startTime = GetEpochTime()
+    -- Server clock alongside the client clock: startTime comes from time()
+    -- captured once at addon load (drifts over long sessions, sub-second
+    -- digits untrustworthy). The pair lets external tools measure the
+    -- client/server delta while keeping the client clock — the one video
+    -- recordings are stamped with — for VOD matching.
+    currentMatch.serverStartTime = GetServerTime and GetServerTime() or nil
 
     -- Snapshot ratings
     ratingsBefore = SnapshotAllRatings()
@@ -1453,6 +1488,7 @@ local function SaveMatch(result)
     for guid, entry in pairs(currentMatch.roster) do
         local p = {
             name = entry.name,
+            fullName = entry.fullName,
             class = entry.class,
             race = entry.race,
             spec = entry.spec,
@@ -1480,6 +1516,15 @@ local function SaveMatch(result)
     local bracketNames = { [2] = "2v2", [3] = "3v3", [5] = "5v5" }
     local bracket = bracketNames[teamSize]
 
+    -- Sorted player GUID list, hoisted out of the eventLog so external tools
+    -- (desktop companion, web fingerprint matching) can identify the game
+    -- from plain top-level fields without inflating the compressed blob.
+    local playerGuids = {}
+    for guid in pairs(currentMatch.roster) do
+        playerGuids[#playerGuids + 1] = guid
+    end
+    table.sort(playerGuids)
+
     -- Compress event log
     local compressedEventLog = CompressEventLog()
 
@@ -1489,8 +1534,12 @@ local function SaveMatch(result)
 
     -- Save to TrinketedHistoryDB
     table.insert(TrinketedHistoryDB.games, {
+        id = GenerateGameId(),
         startTime = currentMatch.startTime,
         endTime = currentMatch.endTime,
+        serverStartTime = currentMatch.serverStartTime,
+        serverEndTime = GetServerTime and GetServerTime() or nil,
+        playerGuids = playerGuids,
         map = currentMatch.map,
         enemyComp = enemyComp,
         result = result,
