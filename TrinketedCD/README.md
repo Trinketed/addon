@@ -1,52 +1,44 @@
 # TrinketedCD
 
-Arena cooldown tracker addon for World of Warcraft. Part of the [Trinketed](https://github.com/Trinketed/addon) addon suite.
+Party cooldown tracker for arena PvP. Part of the [Trinketed](https://github.com/Trinketed/addon) addon suite.
 
 ## Features
 
-- Tracks enemy trinket and major cooldown usage in arena
-- Class-colored cooldown display with duration timers
-- Supports all arena brackets (2v2, 3v3, 5v5)
-- Configurable display layout and positioning
-- Test mode for trying out the UI outside of arena
-- Import/export cooldown profiles
+- Tracks your **party members'** cooldowns in arena — trinkets, interrupts, defensives, offensives — started automatically from the combat log
+- Cooldown bars anchored to party frames (left/right side) or placed freely
+- Per-class spell selection arranged in a customizable grid
+- Shared and linked cooldowns handled correctly (e.g. Divine Shield / Blessing of Protection)
+- Glow when a cooldown comes back up, flash on use, pulse on low timer
+- Import/export layout strings to share setups with teammates
+- Optional tracking outside arena (suppressed in raids)
+- Test mode for configuring the UI outside of arena
 
-## Supported Zones
+Arena detection uses `IsInInstance()` — no hardcoded zone list. All brackets (2v2/3v3/5v5) supported.
 
-- Nagrand Arena
-- Blade's Edge Arena
-- Ruins of Lordaeron
+## Commands
+
+Open the settings with `/trinketed` → Cooldowns tab. Test mode and all options live there.
 
 ## Dependencies
 
-Requires the core [Trinketed](https://github.com/Trinketed/addon) addon to be installed and loaded first.
+Requires the core [Trinketed](https://github.com/Trinketed/addon) addon (provides `TrinketedLib`).
 
 ## Development
 
-This repo is included as a git submodule in the [main Trinketed repo](https://github.com/Trinketed/addon). To work on it:
-
-```
-git clone --recurse-submodules git@github.com:Trinketed/addon.git
-cd TrinketedCD
-# make changes, commit, push to this repo
-cd ..
-git add TrinketedCD
-git commit -m "Update TrinketedCD"
-git push  # triggers auto-release
-```
+This folder is part of the [Trinketed monorepo](https://github.com/Trinketed/addon) — edit, commit, and push there. See the root README for the junction-based dev setup.
 
 ## File Structure
 
 | File | Purpose |
 |------|---------|
-| `Core.lua` | Namespace, constants, state, event handling, slash commands |
+| `Core.lua` | Namespace, constants, state, event handling |
 | `CooldownData.lua` | Cooldown spell database (abilities, durations, classes) |
 | `Tracker.lua` | Combat log parsing, cooldown state tracking |
 | `Display.lua` | UI frames, cooldown bars, timer rendering |
-| `Options.lua` | Settings panel, layout configuration |
-| `Serialize.lua` | Import/export profile serialization |
-| `TestMode.lua` | Simulated arena environment for UI testing |
+| `Options.lua` | Settings panel, grid layout configuration |
+| `Serialize.lua` | Import/export layout serialization |
+| `TestMode.lua` | Simulated party for UI testing |
 
 ## Data Storage
 
-Settings and profiles are stored in `TrinketedCDDB` (WoW SavedVariables).
+Settings and layouts are stored in `TrinketedCDDB` (WoW SavedVariables).
