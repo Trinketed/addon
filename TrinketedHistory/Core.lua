@@ -1328,53 +1328,6 @@ end
 local unsyncedGames = 0
 local UpdateSyncNudge  -- defined with the Matches tab UI
 
--- Auto-reload after each arena: /reload is the only way to flush
--- SavedVariables mid-session, so (when enabled) we reload on zoning OUT
--- of the arena — right after a loading screen, and never while queued.
-local autoReload = { timer = nil, armed = false }
-
-function autoReload.SafeToReload()
-    if InCombatLockdown() then return false end
-    if state ~= "IDLE" then return false end
-    for i = 1, GetMaxBattlefieldID() do
-        local status = GetBattlefieldStatus(i)
-        if status == "queued" or status == "confirm" or status == "active" then
-            return false
-        end
-    end
-    return true
-end
-
-function autoReload.Schedule()
-    if not autoReload.armed then return end
-    autoReload.armed = false
-    local s = TrinketedHistoryDB and TrinketedHistoryDB.settings
-    if not (s and s.autoReload) then return end
-    if unsyncedGames == 0 or autoReload.timer then return end
-    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Reloading UI in 5s to save match data — |cffF4F4F5/trinketed noreload|r to cancel")
-    autoReload.timer = C_Timer.NewTimer(5, function()
-        autoReload.timer = nil
-        local s2 = TrinketedHistoryDB and TrinketedHistoryDB.settings
-        if not (s2 and s2.autoReload) then return end
-        if unsyncedGames == 0 then return end
-        if not autoReload.SafeToReload() then
-            print("|cff00ccff" .. DISPLAY_NAME .. ":|r Auto-reload skipped (combat or queue active) — data saves on your next /reload or logout")
-            return
-        end
-        ReloadUI()
-    end)
-end
-
-lib:RegisterSubCommand("noreload", function()
-    if autoReload.timer then
-        autoReload.timer:Cancel()
-        autoReload.timer = nil
-        print("|cff00ccff" .. DISPLAY_NAME .. ":|r Auto-reload cancelled — data saves on your next /reload or logout")
-    else
-        print("|cff00ccff" .. DISPLAY_NAME .. ":|r No auto-reload pending")
-    end
-end)
-
 local function SaveMatch(result)
     if not currentMatch or not currentMatch.startTime then
         dbg("SaveMatch() aborted — no match data")
@@ -1585,7 +1538,6 @@ local function SaveMatch(result)
 
     unsyncedGames = unsyncedGames + 1
     if UpdateSyncNudge then UpdateSyncNudge() end
-    autoReload.armed = true
 
     ResetMatchState()
 end
@@ -5163,9 +5115,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
             TrinketedHistoryDB.minimap = TrinketedHistoryDB.minimap or { minimapPos = 220, hide = false }
             TrinketedHistoryDB.settings = TrinketedHistoryDB.settings or { showTimestamp = true }
             TrinketedHistoryDB.settings.hiddenReplayCDs = TrinketedHistoryDB.settings.hiddenReplayCDs or {}
-            if TrinketedHistoryDB.settings.autoReload == nil then
-                TrinketedHistoryDB.settings.autoReload = true
-            end
 
             -- Backfill: stamp pre-season-tracking games as season 1
             for _, g in ipairs(TrinketedHistoryDB.games) do
@@ -5256,7 +5205,6 @@ frame:SetScript("OnEvent", function(self, event, ...)
             end
             LoggingCombat(false)
             UpdateOverlayVisibility()
-            autoReload.Schedule()
         end
 
     -----------------------------------------------------------------
@@ -5836,14 +5784,6 @@ lib:RegisterSubAddon("History", {
                 TrinketedHistoryDB.settings.showTimestamp, function(isOn)
                     TrinketedHistoryDB.settings.showTimestamp = isOn
                     UpdateOverlayVisibility()
-                end)
-            y = y - 40
-
-            y = lib:CreateSectionHeader(settingsContainer, y, "MATCH DATA")
-
-            lib:CreateCheckbox(settingsContainer, 20, y, "Auto-reload UI after leaving arena to save match data",
-                TrinketedHistoryDB.settings.autoReload, function(isOn)
-                    TrinketedHistoryDB.settings.autoReload = isOn
                 end)
 
         end
