@@ -167,6 +167,93 @@ local function dbg(...)
     print("|cffff9900" .. DISPLAY_NAME .. " [DEBUG]:|r", ...)
 end
 
+-- Persistent developer mode (toggled with /trinketed dev). Unlike debugMode
+-- (chat logging, resets on reload), this survives reloads and gates
+-- developer-facing UI features — e.g. the replay feed's raw-event tooltip.
+-- Other files check it via addon:IsDevMode().
+function addon:IsDevMode()
+    return TrinketedHistoryDB and TrinketedHistoryDB.settings
+        and TrinketedHistoryDB.settings.devMode or false
+end
+
+-- Dev mode: copyable-text popup. WoW has no clipboard API, so the text is
+-- surfaced pre-selected in an EditBox for Ctrl+C. Reusable from any module
+-- feature (game ids today; whatever needs copying next). Frame built once,
+-- cached on the addon table.
+function addon:ShowDevCopyBox(label, text)
+    local f = self.devCopyFrame
+    if not f then
+        f = CreateFrame("Frame", "TrinketedDevCopyFrame", UIParent, "BackdropTemplate")
+        f:SetSize(360, 72)
+        f:SetPoint("CENTER")
+        -- Above the options panel (DIALOG strata) so it can't open underneath.
+        f:SetFrameStrata("FULLSCREEN_DIALOG")
+        f:SetToplevel(true)
+        f:EnableMouse(true)
+        f:SetBackdrop({
+            bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeSize = 1,
+        })
+        f:SetBackdropColor(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
+        f:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3], 0.6)
+        tinsert(UISpecialFrames, "TrinketedDevCopyFrame")
+
+        f.title = f:CreateFontString(nil, "OVERLAY")
+        f.title:SetFont(lib.FONT_DISPLAY, 10, "")
+        f.title:SetPoint("TOPLEFT", 10, -8)
+        f.title:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+
+        f.hint = f:CreateFontString(nil, "OVERLAY")
+        f.hint:SetFont(lib.FONT_BODY, 9, "")
+        f.hint:SetPoint("TOPRIGHT", -10, -8)
+        f.hint:SetText("Ctrl+C to copy — Esc to close")
+        f.hint:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+        f.box = CreateFrame("EditBox", nil, f, "BackdropTemplate")
+        f.box:SetPoint("TOPLEFT", 10, -26)
+        f.box:SetPoint("BOTTOMRIGHT", -10, 12)
+        f.box:SetFont(lib.FONT_MONO, 10, "")
+        f.box:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+        f.box:SetAutoFocus(false)
+        f.box:SetBackdrop({
+            bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+            edgeSize = 1,
+        })
+        f.box:SetBackdropColor(0, 0, 0, 0.5)
+        f.box:SetBackdropBorderColor(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+        f.box:SetTextInsets(6, 6, 0, 0)
+        f.box:SetScript("OnEscapePressed", function() f:Hide() end)
+        f.box:SetScript("OnEnterPressed", function() f:Hide() end)
+        -- Read-only in effect: any user edit snaps back to the stored text
+        -- so Ctrl+C always grabs the real value.
+        f.box:SetScript("OnTextChanged", function(box, isUserInput)
+            if isUserInput and box:GetText() ~= f.text then
+                box:SetText(f.text or "")
+                box:HighlightText()
+            end
+        end)
+        -- Re-select whenever focus lands in the box (including clicking into
+        -- it), so a plain Ctrl+C always copies the whole value.
+        f.box:SetScript("OnEditFocusGained", function(box) box:HighlightText() end)
+
+        self.devCopyFrame = f
+    end
+    f.text = text or ""
+    f.title:SetText(label or "Copy")
+    f.box:SetText(f.text)
+    f:Show()
+    -- Defer focus by one frame: grabbing focus inside the same click that
+    -- opened the box can drop the selection highlight.
+    C_Timer.After(0, function()
+        if f:IsShown() then
+            f.box:SetFocus()
+            f.box:HighlightText()
+        end
+    end)
+end
+
 ---------------------------------------------------------------------------
 -- Timestamp Sync
 ---------------------------------------------------------------------------
@@ -467,7 +554,12 @@ local function EnrichEvent(event)
         end
     end
 
-    local dbEntry = SPELL_DB and SPELL_DB[spellID]
+    -- Rank-proof lookup (addon.ResolveSpell, ReplayEngine.lua): off-rank
+    -- casts resolve by name, disambiguated by the caster's class when two
+    -- classes share a spell name.
+    local srcEntry = event.srcGUID and guidToRoster[event.srcGUID]
+    local dbEntry = select(2, addon.ResolveSpell(spellID, event.spell,
+        srcEntry and srcEntry.class))
     if dbEntry then
         event.cat = dbEntry.cat
         if dbEntry.dur then event.dur = dbEntry.dur end
@@ -861,7 +953,11 @@ local function OnCLEU()
     elseif subevent == "SPELL_CAST_SUCCESS" then
         local spellID, spellName = info[12], info[13]
         -- Skip trinket/cc_break/racial — handled by UNIT_SPELLCAST_SUCCEEDED / ARENA_COOLDOWNS_UPDATE
-        local dbEntry = spellID and SPELL_DB and SPELL_DB[spellID]
+        -- Rank-proof: off-rank/per-class variants (e.g. Arcane Torrent) still
+        -- resolve so they don't get double-recorded through both paths.
+        local srcEntry = info[4] and guidToRoster[info[4]]
+        local dbEntry = select(2, addon.ResolveSpell(spellID, spellName,
+            srcEntry and srcEntry.class))
         local skipCat = dbEntry and dbEntry.cat
         if skipCat ~= "trinket" and skipCat ~= "cc_break" and skipCat ~= "racial" then
             event = {
@@ -1070,7 +1166,7 @@ local function PollUnitAuras(unit, t)
             local drCat = DRList:GetCategoryBySpellID(spellID)
             if drCat then entry.ccType = drCat; entry.dr = drCat end
         end
-        local db = SPELL_DB and SPELL_DB[spellID]
+        local db = select(2, addon.ResolveSpell(spellID, name))
         if db then entry.cat = db.cat end
         auras[#auras + 1] = entry
     end
@@ -1088,7 +1184,7 @@ local function PollUnitAuras(unit, t)
             local drCat = DRList:GetCategoryBySpellID(spellID)
             if drCat then entry.ccType = drCat; entry.dr = drCat end
         end
-        local db = SPELL_DB and SPELL_DB[spellID]
+        local db = select(2, addon.ResolveSpell(spellID, name))
         if db then entry.cat = db.cat end
         auras[#auras + 1] = entry
     end
@@ -1283,6 +1379,47 @@ local function InitMatch()
     lastTargets = {}
 end
 
+---------------------------------------------------------------------------
+-- Pet → owner tracking
+-- CLEU events from pets carry the pet's GUID; the replayer attributes them
+-- back to the owning player (Spell Lock / Devour Magic on the warlock's CD
+-- row). SPELL_SUMMON links owner→pet for mid-match summons, but a pet that
+-- already existed when the gates opened never appears in a summon event, so
+-- we also record explicit pet_owner events from unit tokens at recording
+-- start and on every UNIT_PET. One table-valued local (200-locals limit).
+---------------------------------------------------------------------------
+local petTrack = {
+    seen = {},  -- petGUID → ownerGUID already recorded this match
+    UNITS = {
+        player = "pet",
+        party1 = "partypet1", party2 = "partypet2", party3 = "partypet3",
+        party4 = "partypet4",
+        arena1 = "arenapet1", arena2 = "arenapet2", arena3 = "arenapet3",
+        arena4 = "arenapet4", arena5 = "arenapet5",
+    },
+}
+
+function petTrack:Scan()
+    if state ~= "RECORDING" then return end
+    for ownerUnit, petUnit in pairs(self.UNITS) do
+        local petGUID = UnitGUID(petUnit)
+        if petGUID then
+            local ownerGUID = UnitGUID(ownerUnit)
+            if ownerGUID and self.seen[petGUID] ~= ownerGUID then
+                self.seen[petGUID] = ownerGUID
+                local petName = UnitName(petUnit)
+                AppendEvent({
+                    t = GetRelativeTime(), type = "pet_owner",
+                    petGUID = petGUID, ownerGUID = ownerGUID,
+                    pet = petName and StripRealm(petName) or nil,
+                })
+                relevantGUIDs[petGUID] = true
+                dbg("Pet owner:", petName or petGUID, "→", ownerUnit)
+            end
+        end
+    end
+end
+
 local function StartRecording()
     state = "RECORDING"
     gatesOpenTime = GetTime()
@@ -1302,6 +1439,10 @@ local function StartRecording()
 
     -- Emit gates_open
     AppendEvent({ t = 0, type = "gates_open" })
+
+    -- Record pets that already exist at the gates (no SPELL_SUMMON in-log)
+    wipe(petTrack.seen)
+    petTrack:Scan()
 
     -- Start 200ms polling
     pollTicker = C_Timer.NewTicker(0.2, PollAllUnits)
@@ -2697,17 +2838,53 @@ resetBtn:SetScript("OnClick", function()
 end)
 
 -- Sync nudge: games recorded this session live only in memory until a
--- /reload or logout writes SavedVariables — remind before web-app upload
-local syncNudge = matchesContainer:CreateFontString(nil, "OVERLAY")
-syncNudge:SetFont(lib.FONT_BODY, 10, "")
-syncNudge:SetPoint("TOPRIGHT", -84, -16)
-syncNudge:SetJustifyH("RIGHT")
+-- /reload or logout writes SavedVariables — remind before web-app upload.
+-- Lives in filter row 3 (right of the search box), the only row with room.
+local syncNudge = CreateFrame("Button", nil, matchesContainer)
+syncNudge:SetHeight(22)
+syncNudge:SetPoint("TOPRIGHT", -16, -62)
 syncNudge:Hide()
+do
+    local bg = syncNudge:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(C.frameBg[1], C.frameBg[2], C.frameBg[3], 1)
+    local border = syncNudge:CreateTexture(nil, "ARTWORK")
+    border:SetPoint("TOPLEFT", -1, 1); border:SetPoint("BOTTOMRIGHT", 1, -1)
+    border:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.6)
+    local inner = syncNudge:CreateTexture(nil, "ARTWORK", nil, 1)
+    inner:SetAllPoints()
+    inner:SetColorTexture(C.frameBg[1], C.frameBg[2], C.frameBg[3], 1)
+    local label = syncNudge:CreateFontString(nil, "OVERLAY")
+    label:SetFont(lib.FONT_BODY, 10, ""); label:SetPoint("CENTER")
+    label:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    syncNudge.label = label
+    syncNudge:SetScript("OnEnter", function(self)
+        inner:SetColorTexture(C.tabActive[1], C.tabActive[2], C.tabActive[3], 1)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText("Save to disk")
+        GameTooltip:AddLine("Games from this session are only in memory until the UI"
+            .. " reloads. Click to reload now so the web app can upload them.",
+            1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    syncNudge:SetScript("OnLeave", function()
+        inner:SetColorTexture(C.frameBg[1], C.frameBg[2], C.frameBg[3], 1)
+        GameTooltip:Hide()
+    end)
+    syncNudge:SetScript("OnClick", function()
+        if InCombatLockdown() then
+            print("|cffE8B923" .. DISPLAY_NAME .. ":|r Can't reload during combat.")
+            return
+        end
+        if C_UI and C_UI.Reload then C_UI.Reload() else ReloadUI() end
+    end)
+end
 
 UpdateSyncNudge = function()
     if unsyncedGames > 0 then
-        syncNudge:SetText("|cffE8B923" .. unsyncedGames .. " game" ..
-            (unsyncedGames == 1 and "" or "s") .. " not on disk — /reload to sync|r")
+        syncNudge.label:SetText(unsyncedGames .. " unsaved game" ..
+            (unsyncedGames == 1 and "" or "s") .. " — Reload to sync")
+        syncNudge:SetWidth(syncNudge.label:GetStringWidth() + 20)
         syncNudge:Show()
     else
         syncNudge:Hide()
@@ -3168,12 +3345,47 @@ function historyView:MakeRow()
     hl:SetAllPoints()
     hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
 
+    -- Dev mode: hovering a row shows record metadata (game id, log size…),
+    -- clicking it opens the copyable game-id box. Both no-op with dev off,
+    -- so regular users see no behavior change.
+    row:SetScript("OnEnter", function(self)
+        if not (self.game and addon:IsDevMode()) then return end
+        local g = self.game
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Dev — game record", C.accent[1], C.accent[2], C.accent[3])
+        GameTooltip:AddDoubleLine("id", g.id or "(none — pre-id game)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+        GameTooltip:AddDoubleLine("db index", tostring(self.dbIndex), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+        GameTooltip:AddDoubleLine("eventLog", g.eventLog and (#g.eventLog .. " chars") or "(none)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+        GameTooltip:AddDoubleLine("startTime", tostring(g.startTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+        if g.serverStartTime then
+            GameTooltip:AddDoubleLine("serverStartTime", tostring(g.serverStartTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+        end
+        if g.id then
+            GameTooltip:AddLine("Click row to copy game id", 0.55, 0.55, 0.55)
+        end
+        GameTooltip:Show()
+    end)
+    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    -- OnMouseUp rather than OnClick: it fires on any mouse-enabled frame
+    -- with no click-registration involved, so pooled rows can't miss it.
+    row:SetScript("OnMouseUp", function(self, button)
+        if button ~= "LeftButton" then return end
+        if not (self.game and addon:IsDevMode()) then return end
+        local g = self.game
+        if not g.id then
+            print("|cff00ccff" .. DISPLAY_NAME .. ":|r This game predates per-game ids — nothing to copy.")
+            return
+        end
+        addon:ShowDevCopyBox("Game ID  |cff888888#" .. tostring(self.dbIndex) .. "|r", g.id)
+    end)
+
     return row
 end
 
 -- Fill a pooled row with one game's data (i = original DB index, for the # label).
 function historyView:Populate(row, i, game)
     row.game = game
+    row.dbIndex = i  -- for the dev-mode tooltip/copy box
 
     row.index:SetText("#" .. i)
     row.index:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
@@ -4636,6 +4848,7 @@ minimapButton:SetScript("OnClick", function(self, button)
         print("  /trinketed history — toggle game history")
         print("  /trinketed minimap — toggle minimap button")
         print("  /trinketed hdebug — toggle history debug logging")
+        print("  /trinketed dev — toggle developer mode (raw-data inspection)")
         print("  /trinketed tsdebug — force-show timestamp overlay + barcode")
         print("  /trinketed sbdebug — show live scoreboard leaderboard")
         print("  /trinketed status — dump current state")
@@ -5102,6 +5315,7 @@ frame:RegisterEvent("UNIT_TARGET")
 frame:RegisterEvent("PLAYER_FOCUS_CHANGED")
 frame:RegisterEvent("ARENA_COOLDOWNS_UPDATE")
 frame:RegisterEvent("LOSS_OF_CONTROL_ADDED")
+frame:RegisterEvent("UNIT_PET")
 
 frame:SetScript("OnEvent", function(self, event, ...)
     -----------------------------------------------------------------
@@ -5308,7 +5522,9 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- Friendly trinket/CC-break detection via SPELL_DB
         -- Only for player/party units — arena opponents are handled by ARENA_COOLDOWNS_UPDATE
         if SPELL_DB and not unit:match("^arena") then
-            local dbEntry = SPELL_DB[spellID]
+            local rosterEntry = guidToRoster[guid]
+            local dbEntry = select(2, addon.ResolveSpell(spellID, spellName,
+                rosterEntry and rosterEntry.class))
             if dbEntry then
                 local cat = dbEntry.cat
                 if cat == "trinket" or cat == "cc_break" or cat == "racial" then
@@ -5343,6 +5559,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_TARGET" then
         local unit = ...
         if unit then OnUnitTarget(unit) end
+
+    -----------------------------------------------------------------
+    -- UNIT_PET — a unit's pet changed (summon/dismiss/swap)
+    -----------------------------------------------------------------
+    elseif event == "UNIT_PET" then
+        petTrack:Scan()
 
     -----------------------------------------------------------------
     -- PLAYER_FOCUS_CHANGED
@@ -5439,6 +5661,14 @@ local function RegisterSubCommands()
     lib:RegisterSubCommand("hdebug", function()
         debugMode = not debugMode
         print("|cff00ccff" .. DISPLAY_NAME .. ":|r History debug mode " .. (debugMode and "|cff00ff00ON" or "|cffff0000OFF") .. "|r")
+    end)
+
+    lib:RegisterSubCommand("dev", function()
+        local s = TrinketedHistoryDB and TrinketedHistoryDB.settings
+        if not s then return end
+        -- Store nil (not false) when off so the SavedVariables file stays clean.
+        s.devMode = not s.devMode or nil
+        print("|cff00ccff" .. DISPLAY_NAME .. ":|r Developer mode " .. (s.devMode and "|cff00ff00ON" or "|cffff0000OFF") .. "|r (persists across reloads)")
     end)
 
     lib:RegisterSubCommand("tsdebug", function()

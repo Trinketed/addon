@@ -178,6 +178,76 @@ addon.CLASS_COOLDOWNS = {
 }
 
 ---------------------------------------------------------------------------
+-- Rank-proof SPELL_DB resolution.
+-- The combat log records the spell ID of the rank actually cast (e.g.
+-- Kidney Shot rank 2 = 8643), while SPELL_DB and CLASS_COOLDOWNS curate one
+-- ID per spell (408). All ranks of a spell share a name, so on an ID miss
+-- we resolve through a name → candidate-IDs index built lazily from
+-- SPELL_DB.
+--
+-- Distinct spells can also share a name across classes (Shaman vs Druid
+-- Nature's Swiftness, Mage vs Druid Remove Curse/Clearcasting), so a name
+-- alone is not always enough: with multiple candidates the caster's class
+-- picks the right one — via CLASS_COOLDOWNS membership, or an optional
+-- `class = "Druid"` field on the SPELL_DB entry for spells that aren't
+-- cooldown-tracked. If it's still ambiguous we return no entry at all:
+-- wrong attribution is worse than none.
+--
+-- SPELL_DB names may carry a curation-only "(Shaman)"-style suffix to stay
+-- readable; the index registers both the full and the stripped (in-game)
+-- name so lookups by combat-log name still hit.
+--
+-- Returns: canonicalSpellID, dbEntry (dbEntry nil when unknown/ambiguous;
+-- the raw spellID passes through in that case). casterClass is optional.
+-- Exposed as addon.ResolveSpell for ReplayUI/Core (they load after us).
+---------------------------------------------------------------------------
+local nameCandidates   -- lowercased name → sorted { spellID, ... }
+local cdClassOfID      -- spellID → class name, from CLASS_COOLDOWNS
+local function BuildNameIndex()
+    nameCandidates, cdClassOfID = {}, {}
+    for class, list in pairs(addon.CLASS_COOLDOWNS) do
+        for _, id in ipairs(list) do cdClassOfID[id] = class end
+    end
+    local function register(key, id)
+        local list = nameCandidates[key]
+        if not list then list = {}; nameCandidates[key] = list end
+        list[#list + 1] = id
+    end
+    for id, entry in pairs(SPELL_DB) do
+        if entry.name then
+            local full = entry.name:lower()
+            register(full, id)
+            local stripped = full:gsub("%s*%b()$", "")
+            if stripped ~= full then register(stripped, id) end
+        end
+    end
+    -- Deterministic candidate order regardless of pairs() iteration.
+    for _, list in pairs(nameCandidates) do table.sort(list) end
+end
+
+local function ResolveSpell(spellID, spellName, casterClass)
+    if spellID and SPELL_DB and SPELL_DB[spellID] then
+        return spellID, SPELL_DB[spellID]
+    end
+    if not (spellName and SPELL_DB) then return spellID, nil end
+    if not nameCandidates then BuildNameIndex() end
+    local candidates = nameCandidates[spellName:lower()]
+    if not candidates then return spellID, nil end
+    if #candidates == 1 then
+        return candidates[1], SPELL_DB[candidates[1]]
+    end
+    if casterClass then
+        for _, id in ipairs(candidates) do
+            if cdClassOfID[id] == casterClass or SPELL_DB[id].class == casterClass then
+                return id, SPELL_DB[id]
+            end
+        end
+    end
+    return spellID, nil
+end
+addon.ResolveSpell = ResolveSpell
+
+---------------------------------------------------------------------------
 -- Decompress an eventLog string into parsed data
 -- v3 format: { v=3, startTime, roster={guid={name,class,race,spec,team}}, events={...} }
 -- Returns: { roster, events, matchDuration } or nil, errorMsg
@@ -210,10 +280,43 @@ function addon:DecompressGameLog(eventLogStr)
     -- Find match duration from the last event timestamp
     local matchDuration = events[#events].t or 0
 
+    -- Pet → owner map, so pet-sourced casts (Spell Lock, Devour Magic…) can
+    -- be attributed to the owning player. Two sources:
+    --   * summon events (mid-match summons; owner is src, pet is dst)
+    --   * pet_owner events (explicit unit-token scans recorded since this
+    --     feature landed — covers pets that existed before the gates)
+    -- Then a name-based backfill: a pet GUID changes on every re-summon but
+    -- warlock/hunter pet names persist, so unmapped pet GUIDs inherit the
+    -- owner of a same-named mapped pet (covers pre-existing pets in logs
+    -- recorded before pet_owner events existed).
+    local petOwner = {}
+    local ownerByPetName = {}
+    for _, ev in ipairs(events) do
+        if ev.type == "summon" and ev.srcGUID and ev.dstGUID and roster[ev.srcGUID] then
+            petOwner[ev.dstGUID] = ev.srcGUID
+            if ev.dst then ownerByPetName[ev.dst] = ev.srcGUID end
+        elseif ev.type == "pet_owner" and ev.petGUID and ev.ownerGUID then
+            petOwner[ev.petGUID] = ev.ownerGUID
+            if ev.pet then ownerByPetName[ev.pet] = ev.ownerGUID end
+        end
+    end
+    if next(ownerByPetName) then
+        for _, ev in ipairs(events) do
+            local sg, dg = ev.srcGUID, ev.dstGUID
+            if sg and not petOwner[sg] and sg:find("^Pet%-") and ev.src and ownerByPetName[ev.src] then
+                petOwner[sg] = ownerByPetName[ev.src]
+            end
+            if dg and not petOwner[dg] and dg:find("^Pet%-") and ev.dst and ownerByPetName[ev.dst] then
+                petOwner[dg] = ownerByPetName[ev.dst]
+            end
+        end
+    end
+
     return {
         roster = roster,
         events = events,
         matchDuration = matchDuration,
+        petOwner = petOwner,
     }
 end
 
@@ -221,7 +324,8 @@ end
 -- Build initial replay state from roster
 ---------------------------------------------------------------------------
 local function BuildInitialState(parsedData)
-    local state = { players = {} }
+    -- petOwner is static for the whole log; state holds a shared reference.
+    local state = { players = {}, petOwner = parsedData.petOwner }
     for guid, info in pairs(parsedData.roster) do
         state.players[guid] = {
             name = info.name,
@@ -244,7 +348,7 @@ end
 -- Deep-copy replay state (for reset during seek)
 ---------------------------------------------------------------------------
 local function CopyState(src)
-    local dst = { players = {} }
+    local dst = { players = {}, petOwner = src.petOwner }
     for guid, p in pairs(src.players) do
         local aurasCopy = {}
         for id, a in pairs(p.auras) do
@@ -269,6 +373,19 @@ local function CopyState(src)
         }
     end
     return dst
+end
+
+---------------------------------------------------------------------------
+-- Actor lookup that sees through pets: an event sourced from a pet GUID is
+-- attributed to the owning player (Spell Lock / Devour Magic land on the
+-- warlock's cooldown row).
+---------------------------------------------------------------------------
+local function GetActorPlayer(state, guid)
+    if not guid then return nil end
+    local player = state.players[guid]
+    if player then return player end
+    local owner = state.petOwner and state.petOwner[guid]
+    return owner and state.players[owner] or nil
 end
 
 ---------------------------------------------------------------------------
@@ -308,8 +425,10 @@ local function ProcessEvent(state, ev)
         local player = guid and state.players[guid]
         if player and ev.spellID then
             -- aura_applied carries no duration; fall back to SPELL_DB so major
-            -- CDs/CCs still show a countdown.
-            local db = SPELL_DB and SPELL_DB[ev.spellID]
+            -- CDs/CCs still show a countdown. Rank-proof lookup, keyed to the
+            -- caster's class when we know it (pets resolve to their owner).
+            local caster = GetActorPlayer(state, ev.srcGUID)
+            local _, db = ResolveSpell(ev.spellID, ev.spell, caster and caster.class)
             local dur = db and db.dur
             player.auras[ev.spellID] = {
                 spell = ev.spell,
@@ -384,7 +503,9 @@ local function ProcessEvent(state, ev)
                         -- Approximate applied = snapshot time.
                         local dur = a.duration
                         if not dur or dur == 0 then
-                            local db = SPELL_DB and SPELL_DB[a.spellID]
+                            -- Snapshots carry no caster, so ambiguous
+                            -- same-name spells resolve to nothing (safe).
+                            local _, db = ResolveSpell(a.spellID, a.spell)
                             dur = db and db.dur
                         end
                         newAuras[a.spellID] = {
@@ -402,16 +523,18 @@ local function ProcessEvent(state, ev)
             player.auras = newAuras
         end
 
-    -- cast_success: track cooldowns from SPELL_DB
+    -- cast_success: track cooldowns from SPELL_DB (pet casts attribute to
+    -- the owning player)
     elseif evType == "cast_success" then
-        local guid = ev.srcGUID
-        local player = guid and state.players[guid]
+        local player = GetActorPlayer(state, ev.srcGUID)
         if player and ev.spellID then
-            local dbEntry = SPELL_DB and SPELL_DB[ev.spellID]
+            local canonicalID, dbEntry = ResolveSpell(ev.spellID, ev.spell, player.class)
             if dbEntry and dbEntry.cd and dbEntry.cd > 1.5 then
-                player.cooldowns[ev.spellID] = {
+                -- Keyed by the canonical ID so the tracker icons (keyed from
+                -- CLASS_COOLDOWNS) find it whatever rank was actually cast.
+                player.cooldowns[canonicalID] = {
                     spell = ev.spell,
-                    spellID = ev.spellID,
+                    spellID = canonicalID,
                     castTime = ev.t,
                     cd = dbEntry.cd,
                     cat = dbEntry.cat,
@@ -455,12 +578,20 @@ local function BuildFeedEvents(parsedData)
         guidToClass[guid] = info.class
         guidToName[guid] = info.name
     end
+    -- Pets take their owner's class so their feed rows color correctly
+    -- (names stay the pet's own).
+    for petGUID, ownerGUID in pairs(parsedData.petOwner or {}) do
+        local info = parsedData.roster[ownerGUID]
+        if info then guidToClass[petGUID] = info.class end
+    end
 
     for _, ev in ipairs(parsedData.events) do
         local evType = ev.type
+        local countBefore = #feed
 
         -- Skip polling/state events — only show combat actions
         if evType == "unit_state" or evType == "aura_snapshot" or evType == "cooldown_state"
+            or evType == "pet_owner"
             or evType == "player_entered" or evType == "gates_open" or evType == "match_end"
             or evType == "target_change" or evType == "focus_change"
             or evType == "loss_of_control" or evType == "aura_refresh"
@@ -505,7 +636,8 @@ local function BuildFeedEvents(parsedData)
 
         elseif evType == "cast_success" then
             local cat = "cast"
-            local dbEntry = ev.spellID and SPELL_DB and SPELL_DB[ev.spellID]
+            local dbEntry = select(2, ResolveSpell(ev.spellID, ev.spell,
+                ev.srcGUID and guidToClass[ev.srcGUID]))
             if dbEntry then cat = dbEntry.cat end
             table.insert(feed, {
                 time = ev.t, type = "cast_success", cat = cat,
@@ -584,9 +716,15 @@ local function BuildFeedEvents(parsedData)
             })
 
         elseif evType == "miss" then
+            -- Swing/ranged misses (parry, dodge, block…) carry no spell name;
+            -- label them like the damage branch instead of showing "?".
+            local missSpell = ev.spell
+            if ev.subtype == "swing" then missSpell = "Melee"
+            elseif ev.subtype == "range" then missSpell = "Auto Shot"
+            end
             table.insert(feed, {
                 time = ev.t, type = "miss", cat = "miss",
-                spellName = ev.spell, spellID = ev.spellID,
+                spellName = missSpell, spellID = ev.spellID,
                 srcName = ev.src, dstName = ev.dst,
                 srcClass = ev.srcGUID and guidToClass[ev.srcGUID],
                 dstClass = ev.dstGUID and guidToClass[ev.dstGUID],
@@ -625,6 +763,13 @@ local function BuildFeedEvents(parsedData)
         elseif evType == "cast_fail" then
             -- skip: not useful for replay
         end
+
+        -- Keep a reference (not a copy) to the raw recorded event on every
+        -- feed entry so dev mode can surface it (raw-event tooltip in the
+        -- replay feed).
+        if #feed > countBefore then
+            feed[#feed].raw = ev
+        end
     end
     return feed
 end
@@ -645,13 +790,14 @@ local function BuildTimelineMarkers(parsedData)
                 team = info and info.team,
             })
         elseif ev.type == "cast_success" then
-            local spellID = ev.spellID
-            local dbEntry = spellID and SPELL_DB and SPELL_DB[spellID]
+            -- Pet casts attribute to the owner for team/class context.
+            local info = ev.srcGUID and (roster[ev.srcGUID]
+                or (parsedData.petOwner and roster[parsedData.petOwner[ev.srcGUID]]))
+            local dbEntry = select(2, ResolveSpell(ev.spellID, ev.spell, info and info.class))
             if dbEntry then
                 local cat = dbEntry.cat
                 if cat == "trinket" or cat == "racial" or cat == "cc_break"
                     or cat == "offensive_cd" or cat == "defensive_cd" or cat == "interrupt" then
-                    local info = ev.srcGUID and roster[ev.srcGUID]
                     table.insert(markers, {
                         time = ev.t, cat = cat,
                         label = ev.spell,
@@ -685,9 +831,9 @@ local function BuildSearchMarkers(parsedData, query)
             })
         elseif ev.type == "cast_success" and ev.spell then
             if ev.spell:lower():find(q, 1, true) then
-                local info = ev.srcGUID and roster[ev.srcGUID]
-                local spellID = ev.spellID
-                local dbEntry = spellID and SPELL_DB and SPELL_DB[spellID]
+                local info = ev.srcGUID and (roster[ev.srcGUID]
+                    or (parsedData.petOwner and roster[parsedData.petOwner[ev.srcGUID]]))
+                local dbEntry = select(2, ResolveSpell(ev.spellID, ev.spell, info and info.class))
                 table.insert(markers, {
                     time = ev.t,
                     cat = (dbEntry and dbEntry.cat) or "cast",

@@ -173,7 +173,9 @@ SPELL_DB = {
     [2139]  = { cat = "interrupt", cd = 24, dur = 8, name = "Counterspell" },
 
     -- MAGE — DISPEL
-    [475]   = { cat = "dispel", name = "Remove Curse" },
+    -- `class` disambiguates spells that share a name across classes when an
+    -- off-rank ID is resolved by name (addon.ResolveSpell in ReplayEngine).
+    [475]   = { cat = "dispel", name = "Remove Curse", class = "Mage" },
     [30449] = { cat = "dispel", cd = 6, name = "Spellsteal" },
 
     -- =================================================================
@@ -257,7 +259,7 @@ SPELL_DB = {
     [49376] = { cat = "interrupt", cd = 30, name = "Feral Charge - Cat" },
 
     -- DRUID — DISPEL
-    [2782]  = { cat = "dispel", name = "Remove Curse" },
+    [2782]  = { cat = "dispel", name = "Remove Curse", class = "Druid" },
     [2893]  = { cat = "dispel", name = "Abolish Poison" },
 
     -- =================================================================

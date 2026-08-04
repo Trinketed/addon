@@ -52,9 +52,10 @@ local AURA_CATS = {
     healing_cd = true, mobility = true,
 }
 
-local function ShouldShowAura(spellID)
+local function ShouldShowAura(spellID, spellName)
     if not spellID then return false end
-    local dbEntry = SPELL_DB and SPELL_DB[spellID]
+    -- Rank-proof: off-rank aura IDs resolve to their curated entry by name.
+    local dbEntry = select(2, addon.ResolveSpell(spellID, spellName))
     if dbEntry and AURA_CATS[dbEntry.cat] then return true end
     if DRList and DRList:GetCategoryBySpellID(spellID) then return true end
     return false
@@ -129,6 +130,44 @@ local CAT_COLORS = {
 }
 
 ---------------------------------------------------------------------------
+-- Dev mode (toggled with /trinketed dev): append a raw recorded event to
+-- GameTooltip as sorted key = value lines. Nested tables render one level
+-- deep, which covers everything a v3 event can contain.
+---------------------------------------------------------------------------
+local function DevValueStr(v)
+    local t = type(v)
+    if t == "table" then
+        local parts = {}
+        for k, vv in pairs(v) do
+            parts[#parts + 1] = tostring(k) .. "=" .. (type(vv) == "table" and "{...}" or tostring(vv))
+        end
+        table.sort(parts)
+        return "{" .. table.concat(parts, ", ") .. "}"
+    elseif t == "string" then
+        return string.format("%q", v)
+    end
+    return tostring(v)
+end
+
+local function AddRawEventTooltip(feedEv)
+    -- Prefer the raw recorded event; fall back to the derived feed entry.
+    local raw = feedEv.raw or feedEv
+    if GameTooltip:NumLines() > 0 then
+        GameTooltip:AddLine(" ")
+    end
+    GameTooltip:AddLine("Raw event", C.accent[1], C.accent[2], C.accent[3])
+    local keys = {}
+    for k in pairs(raw) do
+        keys[#keys + 1] = k
+    end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, k in ipairs(keys) do
+        GameTooltip:AddDoubleLine(tostring(k), DevValueStr(raw[k]),
+            0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+    end
+end
+
+---------------------------------------------------------------------------
 -- Death Recap: clicking a death row in the feed opens a compact panel with
 -- the victim's final seconds — HP% (from the 200ms unit_state polls) beside
 -- every hit, heal, aura and defensive cast involving them, ending at the
@@ -156,13 +195,13 @@ local recap = {
 
 -- Category tag for a spellID: DRList CC category first (stun/silence/etc.),
 -- then SpellDB category label.
-function recap:SpellTag(spellID)
+function recap:SpellTag(spellID, spellName)
     if not spellID then return nil end
     if DRList then
         local drCat = DRList:GetCategoryBySpellID(spellID)
         if drCat then return drCat end
     end
-    local db = SPELL_DB and SPELL_DB[spellID]
+    local db = select(2, addon.ResolveSpell(spellID, spellName))
     if db and db.cat then return self.CAT_LABELS[db.cat] or db.cat end
     return nil
 end
@@ -235,11 +274,12 @@ function recap:BuildLines(victimGUID, deathTime)
             elseif ty == "absorb" and ev.dstGUID == victimGUID then
                 text = nameStr(ev.src, ev.srcGUID) .. "  |cffffff66" .. (ev.spell or "?") .. "  " .. AbbrevNumber(ev.amount) .. " abs|r"
             elseif ty == "miss" and ev.dstGUID == victimGUID then
-                text = nameStr(ev.src, ev.srcGUID) .. "  |cff888888" .. (ev.spell or "Melee") .. "  " .. (ev.missType or "MISS") .. "|r"
+                local missSpell = ev.spell or (ev.subtype == "range" and "Auto Shot") or "Melee"
+                text = nameStr(ev.src, ev.srcGUID) .. "  |cff888888" .. missSpell .. "  " .. (ev.missType or "MISS") .. "|r"
             elseif ty == "aura_applied" and ev.dstGUID == victimGUID then
                 local prefix = (ev.auraType == "DEBUFF") and "|cffff8080+" or "|cff80ff80+"
                 text = prefix .. (ev.spell or "?") .. "|r"
-                local tag = self:SpellTag(ev.spellID)
+                local tag = self:SpellTag(ev.spellID, ev.spell)
                 if tag then text = text .. " |cff888888[" .. tag .. "]|r" end
                 if ev.src then text = nameStr(ev.src, ev.srcGUID) .. "  " .. text end
             elseif ty == "aura_break" and ev.dstGUID == victimGUID then
@@ -253,7 +293,9 @@ function recap:BuildLines(victimGUID, deathTime)
                 if ev.extraSpell then text = text .. " (" .. ev.extraSpell .. ")" end
                 text = text .. "|r"
             elseif ty == "cast_success" and ev.srcGUID == victimGUID then
-                local db = ev.spellID and SPELL_DB and SPELL_DB[ev.spellID]
+                local victimInfo = roster[victimGUID]
+                local db = select(2, addon.ResolveSpell(ev.spellID, ev.spell,
+                    victimInfo and victimInfo.class))
                 if db and self.SELF_CAST_CATS[db.cat] then
                     text = nameStr(ev.src, ev.srcGUID) .. "  |cff4dd2ffused " .. (ev.spell or "?") .. "|r"
                         .. " |cff888888[" .. (self.CAT_LABELS[db.cat] or db.cat) .. "]|r"
@@ -766,7 +808,7 @@ local function UpdateUnitFrame(uf, playerState, currentTime, seeking, showAllAur
     local buffs, debuffs = {}, {}
     if playerState.auras then
         for spellID, aura in pairs(playerState.auras) do
-            if showAllAuras or ShouldShowAura(spellID) then
+            if showAllAuras or ShouldShowAura(spellID, aura.spell) then
                 if aura.auraType == "DEBUFF" then
                     table.insert(debuffs, aura)
                 else
@@ -1645,10 +1687,16 @@ local function CreateReplayFrame()
         row.iconBtn:SetPoint("LEFT", 126, 0)
         row.icon = row.iconBtn:CreateTexture(nil, "ARTWORK")
         row.icon:SetAllPoints()
+        -- The icon sits on top of the row and swallows its OnEnter, so the
+        -- dev-mode raw dump is appended here too — hovering anywhere on the
+        -- row (icon included) surfaces the raw event.
         row.iconBtn:SetScript("OnEnter", function(self)
             if row.ev and row.ev.spellID then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
                 GameTooltip:SetSpellByID(row.ev.spellID)
+                if addon.IsDevMode and addon:IsDevMode() then
+                    AddRawEventTooltip(row.ev)
+                end
                 GameTooltip:Show()
             end
         end)
@@ -1690,20 +1738,28 @@ local function CreateReplayFrame()
 
         -- Hover affordance for death rows (the only rows with a special click
         -- action): red tint + tooltip. Other rows keep their plain seek click.
+        -- In dev mode every row also gets a raw-event dump appended.
         row:SetScript("OnEnter", function(self)
-            if self.ev and self.ev.cat == "death" then
+            if not self.ev then return end
+            local isDeath = self.ev.cat == "death"
+            local dev = addon.IsDevMode and addon:IsDevMode()
+            if not (isDeath or dev) then return end
+            if isDeath then
                 self.bg:SetColorTexture(CAT_COLORS.death.r, CAT_COLORS.death.g, CAT_COLORS.death.b, 0.15)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            if isDeath then
                 GameTooltip:SetText("Death Recap")
                 GameTooltip:AddLine("Click to review the final seconds before this death.", 0.6, 0.6, 0.6)
-                GameTooltip:Show()
             end
+            if dev then
+                AddRawEventTooltip(self.ev)
+            end
+            GameTooltip:Show()
         end)
         row:SetScript("OnLeave", function(self)
-            if self.ev and self.ev.cat == "death" then
-                GameTooltip:Hide()
-                self.bg:SetColorTexture(self.bgR or 0, self.bgG or 0, self.bgB or 0, self.bgA or 0)
-            end
+            GameTooltip:Hide()
+            self.bg:SetColorTexture(self.bgR or 0, self.bgG or 0, self.bgB or 0, self.bgA or 0)
         end)
 
         return row
