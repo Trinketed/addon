@@ -93,3 +93,37 @@ function lib:GetSortedSubAddons()
     table.sort(list, function(a, b) return (a.order or 99) < (b.order or 99) end)
     return list
 end
+
+---------------------------------------------------------------------------
+-- Shrink-to-fit for FontStrings
+-- WoW's UI space is resolution-independent (768 units tall on any screen),
+-- but glyphs rasterize at PHYSICAL pixel sizes — so the same string can be
+-- a few units wider on a 1080p screen than on 1440p, enough to clip in a
+-- tightly budgeted column. Call after SetText: restores the FontString's
+-- base size, then steps the font size down (never up) until the string
+-- fits maxWidth. The base size is remembered per FontString, so pooled/
+-- recycled rows re-fit correctly for each new string.
+---------------------------------------------------------------------------
+function lib:FitText(fs, maxWidth)
+    local font, size, flags = fs:GetFont()
+    if not font then return end
+    local base = fs.__fitBaseSize
+    if not base then
+        base = size
+        fs.__fitBaseSize = size
+    elseif size ~= base then
+        fs:SetFont(font, base, flags)
+    end
+    maxWidth = maxWidth or fs:GetWidth()
+    if not maxWidth or maxWidth <= 0 then return end
+    local w = fs:GetStringWidth()
+    if w <= maxWidth or w == 0 then return end
+    -- Linear estimate with a safety margin, then one corrective step —
+    -- glyph metrics aren't perfectly linear in point size.
+    local newSize = math.max(6, base * maxWidth / w * 0.97)
+    fs:SetFont(font, newSize, flags)
+    local w2 = fs:GetStringWidth()
+    if w2 > maxWidth then
+        fs:SetFont(font, math.max(6, newSize * maxWidth / w2 * 0.97), flags)
+    end
+end

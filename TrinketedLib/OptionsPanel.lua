@@ -43,6 +43,24 @@ local function BuildMasterFrame()
 
     table.insert(UISpecialFrames, "TrinketedOptionsFrame")
 
+    -- Fit-to-screen safety net (same pattern as the replay window): the
+    -- panel's 932x520 fits a 768-unit-tall UI at scale 1, but a large UI
+    -- scale or unusual display can shrink the effective space below that.
+    -- Scale only ever goes DOWN from 1, so typical setups are unaffected.
+    local function FitToScreen()
+        local availW = UIParent:GetWidth() * 0.98
+        local availH = UIParent:GetHeight() * 0.96
+        masterFrame:SetScale(math.min(1, availW / FRAME_W, availH / FRAME_H))
+    end
+    FitToScreen()
+    pcall(function() masterFrame:RegisterEvent("DISPLAY_SIZE_CHANGED") end)
+    pcall(function() masterFrame:RegisterEvent("UI_SCALE_CHANGED") end)
+    masterFrame:SetScript("OnEvent", function(_, event)
+        if event == "DISPLAY_SIZE_CHANGED" or event == "UI_SCALE_CHANGED" then
+            FitToScreen()
+        end
+    end)
+
     -- Close button. Raised above the content area so per-module widgets drawn
     -- in the top-right corner (tab bars, reset/lock buttons) can't cover it.
     local closeBtn = CreateFrame("Button", nil, masterFrame, "UIPanelCloseButton")
@@ -203,6 +221,10 @@ end
 
 function lib:ShowOptionsPanel(subAddonName)
     BuildMasterFrame()
+    -- One Trinketed window at a time: standalone windows (the replay viewer)
+    -- share this frame's strata, so leaving one open behind the panel reads as
+    -- a broken overlay. Opening the panel closes them.
+    self:CloseAllWindows()
     PopulateSidebar()
     -- Show the master frame before selecting, so the content frame's
     -- Show() actually fires OnShow handlers (they don't fire while the

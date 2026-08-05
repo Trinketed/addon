@@ -5,6 +5,18 @@
 local lib = LibStub("TrinketedLib-1.0")
 local C = lib.C
 
+-- Standalone windows built here share the options panel's DIALOG strata and
+-- frame level, so showing both at once interleaves them into an unreadable
+-- overlay. They are mutually exclusive by design — one Trinketed window at a
+-- time — which the panel enforces by closing these when it opens.
+lib.windowFrames = lib.windowFrames or {}
+
+function lib:CloseAllWindows()
+    for _, f in ipairs(self.windowFrames) do
+        if f:IsShown() then f:Hide() end
+    end
+end
+
 function lib:CreateWindowFrame(name, opts)
     local width  = opts.width or 800
     local height = opts.height or 520
@@ -35,14 +47,19 @@ function lib:CreateWindowFrame(name, opts)
         table.insert(UISpecialFrames, name)
     end
 
+    lib.windowFrames[#lib.windowFrames + 1] = frame
+
     -- Close button
     frame.closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     frame.closeBtn:SetPoint("TOPRIGHT", -3, -3)
+    frame.closeBtn:SetScript("OnClick", function() frame:Hide() end)
+
+    -- onClose runs on EVERY close path — the close button, Esc via
+    -- UISpecialFrames, CloseAllWindows, or any programmatic Hide — so windows
+    -- reliably release heavy state (the replay's parsed event log used to
+    -- leak whenever it was closed with Esc rather than the button).
     if opts.onClose then
-        frame.closeBtn:SetScript("OnClick", function()
-            opts.onClose()
-            frame:Hide()
-        end)
+        frame:HookScript("OnHide", opts.onClose)
     end
 
     -- Title

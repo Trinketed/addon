@@ -36,6 +36,11 @@ local UNIT_ROW_STRIDE = UNIT_FRAME_H + 2 * (AURA_ICON_SIZE + AURA_ROW_GAP)
 local UNIT_COL1_X = 4           -- friendly column
 local UNIT_COL2_X = 256         -- enemy column
 local UNIT_COL_DIVIDER_X = 248  -- vertical divider between the two columns
+-- Aura icons per row that fit inside one team column without crossing the
+-- divider into the neighboring column (13 at current sizes). Rows render at
+-- most this many; with "All auras" on, a heavily buffed unit's overflow is
+-- dropped rather than bleeding into the other team's column.
+local AURA_MAX_COLS = math.floor((UNIT_COL_DIVIDER_X - UNIT_COL1_X - 4) / (AURA_ICON_SIZE + AURA_ICON_GAP))
 local UNITS_TOP_Y = -22         -- first unit row, just below the section labels
 local FEED_ROW_H = 20
 local FEED_ICON_SIZE = 14
@@ -421,6 +426,7 @@ function recap:Open(deathEv)
             self.rows[i] = row
         end
         row:SetText(text)
+        lib:FitText(row)  -- long recap lines shrink instead of clipping
         row:Show()
     end
     for i = #lines + 1, #self.rows do
@@ -458,12 +464,17 @@ local function CreateUnitFrame(parent, yOffset)
     f.nameText:SetFont(lib.FONT_BODY, 10, "")
     f.nameText:SetPoint("TOPLEFT", 4, -3)
     f.nameText:SetWidth(UNIT_FRAME_W - 60)
+    f.nameText:SetWordWrap(false)
     f.nameText:SetJustifyH("LEFT")
 
-    -- HP text (current/max)
+    -- HP text (current/max). Explicit width budget so it can never spill
+    -- left into the name column: name ends at 4+100=104, hp starts at
+    -- 160-4-52=104. Long values shrink-to-fit instead.
     f.hpText = f:CreateFontString(nil, "OVERLAY")
     f.hpText:SetFont(lib.FONT_MONO, 9, "")
     f.hpText:SetPoint("TOPRIGHT", -4, -3)
+    f.hpText:SetWidth(52)
+    f.hpText:SetWordWrap(false)
     f.hpText:SetJustifyH("RIGHT")
     f.hpText:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
 
@@ -591,6 +602,7 @@ local function UpdateUnitFrame(uf, playerState, currentTime, seeking, showAllAur
         uf.nameText:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
     end
     uf.nameText:SetText(name)
+    lib:FitText(uf.nameText)  -- name + spec can overrun the column on low-DPI screens
 
     -- HP
     local hp = playerState.health
@@ -623,6 +635,7 @@ local function UpdateUnitFrame(uf, playerState, currentTime, seeking, showAllAur
     else
         uf.hpText:SetText("?")
     end
+    lib:FitText(uf.hpText)
 
     -- Power
     local power = playerState.power
@@ -825,7 +838,9 @@ local function UpdateUnitFrame(uf, playerState, currentTime, seeking, showAllAur
     local function RenderAuraRow(list, pool, rowIndex, borderColor)
         local br, bg, bb = borderColor[1], borderColor[2], borderColor[3]
         local yOffset = -(AURA_ROW_GAP + (rowIndex - 1) * (AURA_ICON_SIZE + AURA_ROW_GAP))
-        for idx, aura in ipairs(list) do
+        local shown = math.min(#list, AURA_MAX_COLS)
+        for idx = 1, shown do
+            local aura = list[idx]
             local icon = GetOrCreateAuraIcon(uf, pool, idx)
 
             local col = idx - 1
@@ -883,7 +898,7 @@ local function UpdateUnitFrame(uf, playerState, currentTime, seeking, showAllAur
 
             icon:Show()
         end
-        for i = #list + 1, #pool do
+        for i = shown + 1, #pool do
             if pool[i] then pool[i]:Hide() end
         end
     end
@@ -1673,6 +1688,7 @@ local function CreateReplayFrame()
         row.timeText:SetFont(lib.FONT_MONO, 9, "")
         row.timeText:SetPoint("LEFT", 2, 0)
         row.timeText:SetWidth(38)
+        row.timeText:SetWordWrap(false)
         row.timeText:SetJustifyH("LEFT")
 
         row.srcText = row:CreateFontString(nil, "OVERLAY")
@@ -1890,6 +1906,14 @@ local function CreateReplayFrame()
             end
             row.detailText:SetText(detail)
         end
+
+        -- Shrink-to-fit the text columns: glyph widths vary with the
+        -- viewer's physical resolution (1080p rasterizes small fonts
+        -- slightly wider than 1440p), so a budget that fits one screen can
+        -- clip names/amounts on another.
+        lib:FitText(row.srcText)
+        lib:FitText(row.spellText)
+        lib:FitText(row.detailText)
     end
 
     -- Index of the most recent event at or before the current time (binary search
@@ -2052,6 +2076,11 @@ end
 -- Public API: open replay for a game record
 ---------------------------------------------------------------------------
 function addon:OpenReplay(game)
+    -- Enforce the one-window-at-a-time invariant from this side too, so any
+    -- future caller gets it without having to remember (the panel closes the
+    -- replay symmetrically in lib:ShowOptionsPanel).
+    lib:HideOptionsPanel()
+
     local frame = CreateReplayFrame()
     frame:SetFrameStrata("DIALOG")
     frame:Raise()

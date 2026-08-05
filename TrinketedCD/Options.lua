@@ -635,12 +635,14 @@ local function GetOrCreatePoolRow(state, index, parent)
     row.nameText:SetFont(addon.FONT_BODY, 10, "")
     row.nameText:SetPoint("LEFT", 34, 0)
     row.nameText:SetWidth(200)
+    row.nameText:SetWordWrap(false)
     row.nameText:SetJustifyH("LEFT")
 
     row.durText = row:CreateFontString(nil, "OVERLAY")
     row.durText:SetFont(addon.FONT_MONO, 9, "")
     row.durText:SetPoint("LEFT", 240, 0)
     row.durText:SetWidth(80)
+    row.durText:SetWordWrap(false)
     row.durText:SetJustifyH("LEFT")
 
     state.poolRowPool[index] = row
