@@ -32,6 +32,27 @@ local ADDON_NAME = "TrinketedHistory"
 local DISPLAY_NAME = "Trinketed"
 local currentSeason = (GetCurrentArenaSeason and GetCurrentArenaSeason()) or 1
 if currentSeason == 0 then currentSeason = 1 end
+
+-- GetCurrentArenaSeason() usually returns 0 at load (the server sends season
+-- data later), so currentSeason above is often a stale fallback of 1. Tabs
+-- whose season filter defaults to "current season" register a re-apply
+-- callback here; Apply() re-queries and pushes the real value into every one
+-- of them when the panel opens. A registry rather than direct assignment
+-- because each tab's dropdown lives in its own do-block scope and can't be
+-- reached from the panel's OnShow handler. One table-valued local (Core.lua
+-- is near Lua's 200-locals-per-chunk limit).
+local seasonDefault = { hooks = {} }
+
+function seasonDefault:Register(fn)
+    self.hooks[#self.hooks + 1] = fn
+end
+
+function seasonDefault:Apply()
+    local fresh = GetCurrentArenaSeason and GetCurrentArenaSeason() or 0
+    if fresh > 0 then currentSeason = fresh end
+    for _, fn in ipairs(self.hooks) do fn(currentSeason) end
+    return currentSeason
+end
 local BRANDED_TITLE = "|cffE8B923T|r|cffF4F4F5RINKETED|r History"
 local PREP_BUFF = "Arena Preparation"
 local ROW_HEIGHT = 34
@@ -2752,6 +2773,11 @@ local seasonDD = CreateSearchableDropdown(matchesContainer, "TkSeasonDD", 120, {
 })
 seasonDD.frame:SetPoint("TOPLEFT", 627, -36)
 
+seasonDefault:Register(function(season)
+    filters.season = season
+    seasonDD:SetLabel("|cffE8B923Season " .. season .. "|r")
+end)
+
 ---------------------------------------------------------------------------
 -- Filter Row 3: free-text search
 ---------------------------------------------------------------------------
@@ -3686,6 +3712,11 @@ do
         end,
     })
     sessionSeasonDD.frame:SetPoint("LEFT", sessionMapDD.frame, "RIGHT", 10, 0)
+
+    seasonDefault:Register(function(season)
+        sessionFilters.season = season
+        sessionSeasonDD:SetLabel("|cffE8B923Season " .. season .. "|r")
+    end)
 end
 
 -- Session column headers
@@ -4261,6 +4292,11 @@ do
         end,
     })
     teamSeasonDD.frame:SetPoint("LEFT", teamBracketDD.frame, "RIGHT", 10, 0)
+
+    seasonDefault:Register(function(season)
+        teamFilters.season = season
+        teamSeasonDD:SetLabel("|cffE8B923Season " .. season .. "|r")
+    end)
 end
 
 -- Teams column headers
@@ -6063,16 +6099,10 @@ lib:RegisterSubAddon("History", {
 
         -- Refresh data every time the content frame is shown (tab selected or panel re-opened)
         contentFrame:HookScript("OnShow", function()
-            -- Re-query the season here: at login the API often still returns 0
-            -- (season data loads late), so the cached value can be stale.
-            local freshSeason = GetCurrentArenaSeason and GetCurrentArenaSeason() or 0
-            if freshSeason > 0 then currentSeason = freshSeason end
-
-            -- Default the season filter to the current season on each open
-            filters.season = currentSeason
-            if seasonDD then
-                seasonDD:SetLabel("|cffE8B923Season " .. currentSeason .. "|r")
-            end
+            -- Re-query the season and default every tab's season filter to it.
+            -- At login the API often still returns 0 (season data loads late),
+            -- so the value cached at file scope can be stale.
+            seasonDefault:Apply()
             historyContent:Show()
             RefreshActiveTab()
         end)
