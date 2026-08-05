@@ -1581,7 +1581,9 @@ local function CreateReplayFrame()
         if not session then return end
         local state = session.state
 
-        -- Sort players into friendly/enemy lists
+        -- Split into friendly/enemy, then impose a stable order. state.players
+        -- is rebuilt on every seek, so raw pairs() order can differ between
+        -- refreshes and the unit frames would visibly swap rows mid-replay.
         local friendly, enemy = {}, {}
         for guid, p in pairs(state.players) do
             if p.team == "friendly" then
@@ -1590,6 +1592,9 @@ local function CreateReplayFrame()
                 table.insert(enemy, { guid = guid, state = p })
             end
         end
+        local stateOf = function(e) return e.state end
+        friendly = addon.SortTeam(friendly, session.playerName, stateOf)
+        enemy    = addon.SortTeam(enemy, nil, stateOf)
 
         -- Position friendly frames in the left column
         local friendlyCount = math.min(#friendly, 5)
@@ -2128,6 +2133,10 @@ function addon:OpenReplay(game)
     end
 
     session = newSession
+    -- Who recorded this match: their unit frame sorts to the top of the
+    -- friendly column. Shared/imported replays are from the recorder's
+    -- perspective too, so this is right for them as well.
+    session.playerName = game.playerName
 
     -- Build title
     local enemyComp = game.enemyComp and table.concat(game.enemyComp, "/") or "?"

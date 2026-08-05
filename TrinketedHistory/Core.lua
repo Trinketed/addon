@@ -1848,6 +1848,7 @@ local function ComputeSessions(games, bracketFilter, daysFilter, mapsFilter, sea
     for _, s in ipairs(sessions) do
         local wins, losses = 0, 0
         local totalRatingChange = 0
+        local playTime = 0
 
         for _, g in ipairs(s.games) do
             if g.result == "WIN" then
@@ -1856,10 +1857,16 @@ local function ComputeSessions(games, bracketFilter, daysFilter, mapsFilter, sea
                 losses = losses + 1
             end
             totalRatingChange = totalRatingChange + (g.ratingChange or 0)
+            -- Time actually spent in arena, not the session's wall-clock span
+            -- (which would include queue time and breaks between games).
+            if g.startTime and g.endTime and g.endTime > g.startTime then
+                playTime = playTime + (g.endTime - g.startTime)
+            end
         end
 
         s.wins         = wins
         s.losses       = losses
+        s.playTime     = playTime
         s.ratingStart  = s.games[1].ratingBefore
         s.ratingEnd    = s.games[#s.games].ratingAfter
         -- Prefer direct difference when both endpoints are known;
@@ -3135,6 +3142,17 @@ local function FormatDuration(seconds)
     return string.format("%d:%02d", m, s)
 end
 
+-- Totals spanning many games, so unlike FormatDuration this has to survive
+-- passing an hour: "3h 12m", "47m", "38s".
+local function FormatPlayTime(seconds)
+    if not seconds or seconds <= 0 then return "|cff555555—|r" end
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    if h > 0 then return string.format("%dh %dm", h, m) end
+    if m > 0 then return string.format("%dm", m) end
+    return string.format("%ds", math.floor(seconds))
+end
+
 local function ColorClass(name)
     local color = CLASS_COLORS[name] or "ffffffff"
     return "|c" .. color .. name .. "|r"
@@ -3151,11 +3169,13 @@ local RACE_SHORT = {
     ["Blood Elf"]            = "Belf",
 }
 
-local function FormatTeamNames(team)
+-- playerName (friendly teams only) pins the recording player to the front;
+-- everyone else sorts by class then name. See addon.SortTeam.
+local function FormatTeamNames(team, playerName)
     if not team or #team == 0 then return nil end
     local names = {}
     local details = {}
-    for _, p in ipairs(team) do
+    for _, p in ipairs(addon.SortTeam(team, playerName)) do
         local color = CLASS_COLORS[p.class] or "ffffffff"
         table.insert(names, "|c" .. color .. p.name .. "|r")
         -- Build subtitle: "Spec Race" or fallback to class
@@ -3430,7 +3450,7 @@ function historyView:Populate(row, i, game)
     end
 
     -- Friendly team — show class-colored names
-    local friendlyStr = FormatTeamNames(game.friendlyTeam)
+    local friendlyStr = FormatTeamNames(game.friendlyTeam, game.playerName)
     row.friendly:SetText(friendlyStr or "—")
 
     row.vs:SetText("vs")
@@ -3721,18 +3741,23 @@ end
 
 -- Session column headers
 local sessionHeaderY = -40
+-- Column x/w must stay in sync with the row FontStrings below. The Time
+-- column's space came from trimming columns that were budgeted well above
+-- their longest real value ("08/05 14:32", "1500 -> 1550"); the row still
+-- ends at 726 inside the 740-wide scroll child.
 local sessionHeaders = {
     { text = "#",        x = 4,   w = 22,  justify = "RIGHT" },
-    { text = "Date",     x = 28,  w = 92,  justify = "LEFT" },
-    { text = "Partners", x = 122, w = 130, justify = "LEFT" },
-    { text = "Bracket",  x = 254, w = 44,  justify = "CENTER" },
-    { text = "Games",    x = 300, w = 38,  justify = "CENTER" },
-    { text = "W-L",      x = 340, w = 46,  justify = "CENTER" },
-    { text = "Win%",     x = 388, w = 42,  justify = "CENTER" },
-    { text = "Rating",   x = 432, w = 104, justify = "CENTER" },
-    { text = "MMR",      x = 538, w = 104, justify = "CENTER" },
-    { text = "Net",      x = 646, w = 48,  justify = "CENTER" },
-    { text = "",         x = 696, w = 28,  justify = "CENTER" },
+    { text = "Date",     x = 28,  w = 76,  justify = "LEFT" },
+    { text = "Partners", x = 106, w = 130, justify = "LEFT" },
+    { text = "Bracket",  x = 238, w = 44,  justify = "CENTER" },
+    { text = "Games",    x = 284, w = 34,  justify = "CENTER" },
+    { text = "Time",     x = 320, w = 52,  justify = "CENTER" },
+    { text = "W-L",      x = 374, w = 46,  justify = "CENTER" },
+    { text = "Win%",     x = 422, w = 42,  justify = "CENTER" },
+    { text = "Rating",   x = 466, w = 94,  justify = "CENTER" },
+    { text = "MMR",      x = 562, w = 94,  justify = "CENTER" },
+    { text = "Net",      x = 658, w = 42,  justify = "CENTER" },
+    { text = "",         x = 702, w = 24,  justify = "CENTER" },
 }
 for _, h in ipairs(sessionHeaders) do
     if h.text ~= "" then
@@ -3842,70 +3867,77 @@ function RefreshSessions()
             row.dateStr = row:CreateFontString(nil, "OVERLAY")
             row.dateStr:SetFont(lib.FONT_BODY, 10, "")
             row.dateStr:SetPoint("LEFT", 28, 0)
-            row.dateStr:SetWidth(92)
+            row.dateStr:SetWidth(76)
             row.dateStr:SetJustifyH("LEFT")
             row.dateStr:SetWordWrap(false)
 
             row.partners = row:CreateFontString(nil, "OVERLAY")
             row.partners:SetFont(lib.FONT_BODY, 10, "")
-            row.partners:SetPoint("LEFT", 122, 0)
+            row.partners:SetPoint("LEFT", 106, 0)
             row.partners:SetWidth(130)
             row.partners:SetJustifyH("LEFT")
             row.partners:SetWordWrap(false)
 
             row.bracket = row:CreateFontString(nil, "OVERLAY")
             row.bracket:SetFont(lib.FONT_BODY, 10, "")
-            row.bracket:SetPoint("LEFT", 254, 0)
+            row.bracket:SetPoint("LEFT", 238, 0)
             row.bracket:SetWidth(44)
             row.bracket:SetWordWrap(false)
             row.bracket:SetJustifyH("CENTER")
 
             row.games = row:CreateFontString(nil, "OVERLAY")
             row.games:SetFont(lib.FONT_BODY, 10, "")
-            row.games:SetPoint("LEFT", 300, 0)
-            row.games:SetWidth(38)
+            row.games:SetPoint("LEFT", 284, 0)
+            row.games:SetWidth(34)
             row.games:SetWordWrap(false)
             row.games:SetJustifyH("CENTER")
 
+            row.playTime = row:CreateFontString(nil, "OVERLAY")
+            row.playTime:SetFont(lib.FONT_BODY, 10, "")
+            row.playTime:SetPoint("LEFT", 320, 0)
+            row.playTime:SetWidth(52)
+            row.playTime:SetWordWrap(false)
+            row.playTime:SetJustifyH("CENTER")
+
             row.wl = row:CreateFontString(nil, "OVERLAY")
             row.wl:SetFont(lib.FONT_BODY, 10, "")
-            row.wl:SetPoint("LEFT", 340, 0)
+            row.wl:SetPoint("LEFT", 374, 0)
             row.wl:SetWidth(46)
             row.wl:SetWordWrap(false)
             row.wl:SetJustifyH("CENTER")
 
             row.winPct = row:CreateFontString(nil, "OVERLAY")
             row.winPct:SetFont(lib.FONT_BODY, 10, "")
-            row.winPct:SetPoint("LEFT", 388, 0)
+            row.winPct:SetPoint("LEFT", 422, 0)
             row.winPct:SetWidth(42)
             row.winPct:SetWordWrap(false)
             row.winPct:SetJustifyH("CENTER")
 
             row.rating = row:CreateFontString(nil, "OVERLAY")
             row.rating:SetFont(lib.FONT_BODY, 10, "")
-            row.rating:SetPoint("LEFT", 432, 0)
-            row.rating:SetWidth(104)
+            row.rating:SetPoint("LEFT", 466, 0)
+            row.rating:SetWidth(94)
             row.rating:SetJustifyH("CENTER")
             row.rating:SetWordWrap(false)
 
             row.mmr = row:CreateFontString(nil, "OVERLAY")
             row.mmr:SetFont(lib.FONT_BODY, 10, "")
-            row.mmr:SetPoint("LEFT", 538, 0)
-            row.mmr:SetWidth(104)
+            row.mmr:SetPoint("LEFT", 562, 0)
+            row.mmr:SetWidth(94)
             row.mmr:SetJustifyH("CENTER")
             row.mmr:SetWordWrap(false)
 
             row.net = row:CreateFontString(nil, "OVERLAY")
             row.net:SetFont(lib.FONT_BODY, 10, "")
-            row.net:SetPoint("LEFT", 646, 0)
-            row.net:SetWidth(48)
+            row.net:SetPoint("LEFT", 658, 0)
+            row.net:SetWidth(42)
             row.net:SetWordWrap(false)
             row.net:SetJustifyH("CENTER")
 
             row.expandIndicator = row:CreateFontString(nil, "OVERLAY")
             row.expandIndicator:SetFont(lib.FONT_BODY, 10, "")
-            row.expandIndicator:SetPoint("LEFT", 696, 0)
-            row.expandIndicator:SetWidth(28)
+            row.expandIndicator:SetPoint("LEFT", 702, 0)
+            row.expandIndicator:SetWidth(24)
             row.expandIndicator:SetWordWrap(false)
             row.expandIndicator:SetJustifyH("CENTER")
 
@@ -3957,6 +3989,11 @@ function RefreshSessions()
 
         row.games:SetText(#s.games)
         row.games:SetTextColor(C.textBright[1], C.textBright[2], C.textBright[3])
+
+        -- Total time in arena across the session's games
+        row.playTime:SetText(FormatPlayTime(s.playTime))
+        row.playTime:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+        lib:FitText(row.playTime)
 
         row.wl:SetText("|cff00ff00" .. s.wins .. "|r-|cffff0000" .. s.losses .. "|r")
         row.winPct:SetText(FormatWinPct(s.wins, s.losses))
@@ -4165,7 +4202,7 @@ function RefreshSessions()
                 end
 
                 -- Friendly team (two-line: names + spec/race details)
-                mrow.friendly:SetText(FormatTeamNames(game.friendlyTeam) or "—")
+                mrow.friendly:SetText(FormatTeamNames(game.friendlyTeam, game.playerName) or "—")
 
                 mrow.vs:SetText("vs")
 

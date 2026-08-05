@@ -49,6 +49,40 @@ addon.POWER_COLORS = {
 }
 
 ---------------------------------------------------------------------------
+-- Deterministic team ordering
+-- Team lists reach the UI in whatever order their source produced: saved
+-- records keep the order the roster happened to be built in, and the replay
+-- rebuilds its player table from pairs() on every seek — so members could
+-- appear in one order on the match row and a different one two seeks later.
+-- Canonical order: the recording player first (their own team only), then by
+-- class, then by name.
+--
+-- Returns a NEW array; stored records are never reordered. `keyFn` maps an
+-- item to the record carrying .name/.class, for callers that hold wrappers
+-- (the replay sorts { guid=, state= } pairs).
+---------------------------------------------------------------------------
+function addon.SortTeam(list, playerName, keyFn)
+    local out = {}
+    for i = 1, #list do out[i] = list[i] end
+    table.sort(out, function(a, b)
+        local pa = keyFn and keyFn(a) or a
+        local pb = keyFn and keyFn(b) or b
+        local na, nb = pa.name or "", pb.name or ""
+        if playerName then
+            -- Compare as a boolean pair: returning true whenever `a` is the
+            -- player would break table.sort's ordering contract if both sides
+            -- somehow carry that name.
+            local aIsPlayer, bIsPlayer = (na == playerName), (nb == playerName)
+            if aIsPlayer ~= bIsPlayer then return aIsPlayer end
+        end
+        local ca, cb = pa.class or "", pb.class or ""
+        if ca ~= cb then return ca < cb end
+        return na < nb
+    end)
+    return out
+end
+
+---------------------------------------------------------------------------
 -- Class → tracked cooldown spellIDs (major CDs visible in the CD tracker)
 -- Order matters: displayed left to right in this order
 ---------------------------------------------------------------------------
