@@ -3252,6 +3252,135 @@ local Share = {}
 
 local historyView = { filtered = nil }
 
+-- ---------------------------------------------------------------------------
+-- Open in Trinketed: jump from a match row to the Trinketed app / webapp.
+-- Addons cannot open external programs or write the clipboard, so both paths
+-- are indirect:
+--   * App: write TrinketedHistoryDB.jumpIntent, then reload. The reload
+--     flushes SavedVariables; the desktop companion's watcher sees the intent
+--     and navigates to the game (consume-once on its side, so the intent
+--     lingering in later flushes is harmless).
+--   * Web: surface the /goto resolver URL pre-selected for Ctrl+C.
+-- jumpIntent is a local coordination key like `minimap`/`settings` — never an
+-- ingestion input (backend addon contract, § Export Shape).
+
+local WEB_GOTO_URL = "https://trinketed.com/goto?t=%.3f"
+
+local function OpenGameInApp(game)
+    if InCombatLockdown() then
+        print("|cffE8B923" .. DISPLAY_NAME .. ":|r Can't reload during combat.")
+        return
+    end
+    TrinketedHistoryDB.jumpIntent = {
+        gameId = game.id, -- nil for pre-id games; gameStartTime covers those
+        gameStartTime = game.startTime,
+        createdAt = time(),
+    }
+    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Opening in Trinketed — reloading UI.")
+    if C_UI and C_UI.Reload then C_UI.Reload() else ReloadUI() end
+end
+
+-- Small flyout under the clicked row. Built once; captures the game table
+-- reference at open so pooled-row recycling can't swap it mid-interaction.
+local jumpFlyout
+local function MakeFlyoutButton(parent, yOff, text)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(164, 20)
+    b:SetPoint("TOPLEFT", 4, yOff)
+    b.bg = b:CreateTexture(nil, "BACKGROUND")
+    b.bg:SetAllPoints()
+    b.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0)
+    b.label = b:CreateFontString(nil, "OVERLAY")
+    b.label:SetFont(lib.FONT_BODY, 10, "")
+    b.label:SetPoint("LEFT", 6, 0)
+    b.label:SetText(text)
+    b.label:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+    b:SetScript("OnEnter", function(self)
+        self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.25)
+        self.label:SetTextColor(1, 1, 1)
+    end)
+    b:SetScript("OnLeave", function(self)
+        self.bg:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0)
+        self.label:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+        if not MouseIsOver(jumpFlyout) then jumpFlyout:Hide() end
+    end)
+    return b
+end
+
+local function GetJumpFlyout()
+    if jumpFlyout then return jumpFlyout end
+    local f = CreateFrame("Frame", "TrinketedHistoryJumpFlyout", UIParent, "BackdropTemplate")
+    f:SetSize(172, 70)
+    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    f:SetToplevel(true)
+    f:EnableMouse(true)
+    f:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeSize = 1,
+    })
+    f:SetBackdropColor(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
+    f:SetBackdropBorderColor(C.accent[1], C.accent[2], C.accent[3], 0.6)
+    tinsert(UISpecialFrames, "TrinketedHistoryJumpFlyout")
+
+    f.appBtn = MakeFlyoutButton(f, -4, "Open in Trinketed app")
+    f.appBtn.sub = f.appBtn:CreateFontString(nil, "OVERLAY")
+    f.appBtn.sub:SetFont(lib.FONT_BODY, 8, "")
+    f.appBtn.sub:SetPoint("RIGHT", -6, 0)
+    f.appBtn.sub:SetText("reloads UI")
+    f.appBtn.sub:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    f.appBtn:SetScript("OnMouseUp", function()
+        f:Hide()
+        if f.game then OpenGameInApp(f.game) end
+    end)
+
+    f.webBtn = MakeFlyoutButton(f, -24, "Copy web link")
+    f.webBtn:SetScript("OnMouseUp", function()
+        f:Hide()
+        if f.game then
+            addon:ShowDevCopyBox("Trinketed web link",
+                string.format(WEB_GOTO_URL, f.game.startTime))
+        end
+    end)
+
+    -- Dev-only third entry (hidden otherwise); preserves the old row-click
+    -- game-id copy behavior.
+    f.devBtn = MakeFlyoutButton(f, -44, "Copy game id (dev)")
+    f.devBtn:SetScript("OnMouseUp", function()
+        f:Hide()
+        local g = f.game
+        if not g then return end
+        if not g.id then
+            print("|cff00ccff" .. DISPLAY_NAME .. ":|r This game predates per-game ids — nothing to copy.")
+            return
+        end
+        addon:ShowDevCopyBox("Game ID  |cff888888#" .. tostring(f.dbIndex) .. "|r", g.id)
+    end)
+
+    f:SetScript("OnLeave", function(self)
+        if not MouseIsOver(self) then self:Hide() end
+    end)
+    f:Hide()
+    jumpFlyout = f
+    return f
+end
+
+local function ShowJumpFlyout(row, game, dbIndex)
+    local f = GetJumpFlyout()
+    f.game = game
+    f.dbIndex = dbIndex
+    if addon:IsDevMode() then
+        f.devBtn:Show()
+        f:SetHeight(70)
+    else
+        f.devBtn:Hide()
+        f:SetHeight(50)
+    end
+    f:ClearAllPoints()
+    f:SetPoint("TOPRIGHT", row, "BOTTOMRIGHT", 0, 0)
+    f:Show()
+end
+
 -- Create one pooled Matches row. The replay button reads row.game (set by
 -- :Populate) rather than capturing a game, so rows recycle correctly on scroll.
 function historyView:MakeRow()
@@ -3398,24 +3527,22 @@ function historyView:MakeRow()
     hl:SetAllPoints()
     hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
 
-    -- Dev mode: hovering a row shows record metadata (game id, log size…),
-    -- clicking it opens the copyable game-id box. Both no-op with dev off,
-    -- so regular users see no behavior change.
+    -- Hover: dev mode shows record metadata; everyone gets the click hint.
     row:SetScript("OnEnter", function(self)
-        if not (self.game and addon:IsDevMode()) then return end
-        local g = self.game
+        if not self.game then return end
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine("Dev — game record", C.accent[1], C.accent[2], C.accent[3])
-        GameTooltip:AddDoubleLine("id", g.id or "(none — pre-id game)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
-        GameTooltip:AddDoubleLine("db index", tostring(self.dbIndex), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
-        GameTooltip:AddDoubleLine("eventLog", g.eventLog and (#g.eventLog .. " chars") or "(none)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
-        GameTooltip:AddDoubleLine("startTime", tostring(g.startTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
-        if g.serverStartTime then
-            GameTooltip:AddDoubleLine("serverStartTime", tostring(g.serverStartTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+        if addon:IsDevMode() then
+            local g = self.game
+            GameTooltip:AddLine("Dev — game record", C.accent[1], C.accent[2], C.accent[3])
+            GameTooltip:AddDoubleLine("id", g.id or "(none — pre-id game)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            GameTooltip:AddDoubleLine("db index", tostring(self.dbIndex), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            GameTooltip:AddDoubleLine("eventLog", g.eventLog and (#g.eventLog .. " chars") or "(none)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            GameTooltip:AddDoubleLine("startTime", tostring(g.startTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            if g.serverStartTime then
+                GameTooltip:AddDoubleLine("serverStartTime", tostring(g.serverStartTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            end
         end
-        if g.id then
-            GameTooltip:AddLine("Click row to copy game id", 0.55, 0.55, 0.55)
-        end
+        GameTooltip:AddLine("Click — open in Trinketed", 0.55, 0.55, 0.55)
         GameTooltip:Show()
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -3423,13 +3550,8 @@ function historyView:MakeRow()
     -- with no click-registration involved, so pooled rows can't miss it.
     row:SetScript("OnMouseUp", function(self, button)
         if button ~= "LeftButton" then return end
-        if not (self.game and addon:IsDevMode()) then return end
-        local g = self.game
-        if not g.id then
-            print("|cff00ccff" .. DISPLAY_NAME .. ":|r This game predates per-game ids — nothing to copy.")
-            return
-        end
-        addon:ShowDevCopyBox("Game ID  |cff888888#" .. tostring(self.dbIndex) .. "|r", g.id)
+        if not self.game then return end
+        ShowJumpFlyout(self, self.game, self.dbIndex)
     end)
 
     return row
@@ -5440,6 +5562,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
             TrinketedHistoryDB.minimap = TrinketedHistoryDB.minimap or { minimapPos = 220, hide = false }
             TrinketedHistoryDB.settings = TrinketedHistoryDB.settings or { showTimestamp = true }
             TrinketedHistoryDB.settings.hiddenReplayCDs = TrinketedHistoryDB.settings.hiddenReplayCDs or {}
+            -- A jump intent only matters for the flush that immediately
+            -- follows its click (the companion consumes it once). Clear any
+            -- leftover so it ages out of the file on the next flush.
+            TrinketedHistoryDB.jumpIntent = nil
 
             -- Backfill: stamp pre-season-tracking games as season 1
             for _, g in ipairs(TrinketedHistoryDB.games) do
