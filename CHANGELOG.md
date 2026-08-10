@@ -3,7 +3,10 @@
 > Dev-facing changelog. Release notes on GitHub Releases are auto-generated
 > from commit messages by the packager; this file is stripped from builds.
 
-## Latest (2026-07)
+## Latest (2026-08)
+- **Open in Trinketed:** clicking a row on the Matches tab now opens a flyout with "Open in Trinketed app" and "Copy web link". The app option writes a jump intent to SavedVariables and reloads — the desktop companion picks it up on the flush, brings its window forward, and opens that game's review. The web option surfaces a `trinketed.com/goto` link pre-selected for Ctrl+C (WoW has no clipboard API). Dev mode keeps its game-id copy as a third entry. Without the companion running, the app option is a no-op reload; the web link works for everyone.
+
+## 2026-07
 - **Monorepo consolidation:** dropped the TrinketedCD/TrinketedHistory git submodules and vendored all modules as plain sibling folders; TrinketedAuras, TrinketedLC, and TrinketedLOS are now tracked in-repo but excluded from releases (`pkgmeta.yaml` ignore). Deleted the notify-parent/update-submodule workflow chain. Releases ship core + Cooldowns + History.
 - **Enemies tab** in TrinketedHistory (Matches | Sessions | Teams | Enemies | Settings): every enemy faced with games/W-L/win%/net rating, sortable columns, name search; click an enemy to jump to the Matches tab filtered to all games against them
 - **Free-text match search** on the Matches tab: space-separated terms all must match player names/classes/specs/races on either team or the map
