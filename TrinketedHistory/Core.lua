@@ -106,50 +106,86 @@ local SPEC_SHORT = {
 }
 
 -- Spell name → { class, spec } mapping for spec detection (TBC 2.4.3 talent spells)
+--
+-- Entries must be cast (AssignSpec fires off SPELL_CAST_SUCCESS and
+-- UNIT_SPELLCAST_SUCCEEDED, so passive talents never trigger) and must sit deep
+-- enough in their tree that an off-spec build can't reach them. Shallow talents
+-- are deliberately omitted even though they'd raise the hit rate: an Arms
+-- warrior carries 28 points of Fury, so Death Wish would tag half of them as
+-- Fury. Anything reachable with a 20-point off-tree dip stays out.
 local SPEC_SPELLS = {
     -- WARRIOR
     ["Mortal Strike"]       = { class = "Warrior",     spec = "Arms" },
+    ["Sweeping Strikes"]    = { class = "Warrior",     spec = "Arms" },
     ["Bloodthirst"]         = { class = "Warrior",     spec = "Fury" },
+    ["Rampage"]             = { class = "Warrior",     spec = "Fury" },
     ["Concussion Blow"]     = { class = "Warrior",     spec = "Protection" },
     ["Devastate"]           = { class = "Warrior",     spec = "Protection" },
+    ["Shield Slam"]         = { class = "Warrior",     spec = "Protection" },
     -- PALADIN
     ["Avenger's Shield"]    = { class = "Paladin",     spec = "Protection" },
     ["Holy Shock"]          = { class = "Paladin",     spec = "Holy" },
+    ["Divine Illumination"] = { class = "Paladin",     spec = "Holy" },
     ["Crusader Strike"]     = { class = "Paladin",     spec = "Retribution" },
     ["Repentance"]          = { class = "Paladin",     spec = "Retribution" },
     -- ROGUE
     ["Mutilate"]            = { class = "Rogue",       spec = "Assassination" },
     ["Cold Blood"]          = { class = "Rogue",       spec = "Assassination" },
+    ["Envenom"]             = { class = "Rogue",       spec = "Assassination" },
     ["Blade Flurry"]        = { class = "Rogue",       spec = "Combat" },
     ["Adrenaline Rush"]     = { class = "Rogue",       spec = "Combat" },
     ["Shadowstep"]          = { class = "Rogue",       spec = "Subtlety" },
     ["Hemorrhage"]          = { class = "Rogue",       spec = "Subtlety" },
+    ["Preparation"]         = { class = "Rogue",       spec = "Subtlety" },
     -- PRIEST
     ["Power Infusion"]      = { class = "Priest",      spec = "Discipline" },
     ["Pain Suppression"]    = { class = "Priest",      spec = "Discipline" },
     ["Circle of Healing"]   = { class = "Priest",      spec = "Holy" },
+    ["Lightwell"]           = { class = "Priest",      spec = "Holy" },
     ["Silence"]             = { class = "Priest",      spec = "Shadow" },
     ["Vampiric Touch"]      = { class = "Priest",      spec = "Shadow" },
+    ["Shadowform"]          = { class = "Priest",      spec = "Shadow" },
     -- MAGE
     ["Dragon's Breath"]     = { class = "Mage",        spec = "Fire" },
     ["Blast Wave"]          = { class = "Mage",        spec = "Fire" },
+    ["Combustion"]          = { class = "Mage",        spec = "Fire" },
     ["Ice Barrier"]         = { class = "Mage",        spec = "Frost" },
+    ["Cold Snap"]           = { class = "Mage",        spec = "Frost" },
+    ["Icy Veins"]           = { class = "Mage",        spec = "Frost" },
+    ["Summon Water Elemental"] = { class = "Mage",     spec = "Frost" },
+    ["Presence of Mind"]    = { class = "Mage",        spec = "Arcane" },
+    ["Arcane Power"]        = { class = "Mage",        spec = "Arcane" },
+    ["Slow"]                = { class = "Mage",        spec = "Arcane" },
     -- WARLOCK
     ["Unstable Affliction"] = { class = "Warlock",     spec = "Affliction" },
+    ["Siphon Life"]         = { class = "Warlock",     spec = "Affliction" },
+    ["Dark Pact"]           = { class = "Warlock",     spec = "Affliction" },
+    ["Soul Link"]           = { class = "Warlock",     spec = "Demonology" },
+    ["Demonic Sacrifice"]   = { class = "Warlock",     spec = "Demonology" },
+    ["Summon Felguard"]     = { class = "Warlock",     spec = "Demonology" },
     ["Shadowfury"]          = { class = "Warlock",     spec = "Destruction" },
+    ["Conflagrate"]         = { class = "Warlock",     spec = "Destruction" },
     -- SHAMAN
     ["Elemental Mastery"]   = { class = "Shaman",      spec = "Elemental" },
+    ["Totem of Wrath"]      = { class = "Shaman",      spec = "Elemental" },
     ["Shamanistic Rage"]    = { class = "Shaman",      spec = "Enhancement" },
     ["Stormstrike"]         = { class = "Shaman",      spec = "Enhancement" },
+    ["Earth Shield"]        = { class = "Shaman",      spec = "Restoration" },
+    ["Mana Tide Totem"]     = { class = "Shaman",      spec = "Restoration" },
     -- HUNTER
     ["Intimidation"]        = { class = "Hunter",      spec = "Beast Mastery" },
     ["The Beast Within"]    = { class = "Hunter",      spec = "Beast Mastery" },
+    ["Bestial Wrath"]       = { class = "Hunter",      spec = "Beast Mastery" },
     ["Silencing Shot"]      = { class = "Hunter",      spec = "Marksmanship" },
+    ["Trueshot Aura"]       = { class = "Hunter",      spec = "Marksmanship" },
     ["Wyvern Sting"]        = { class = "Hunter",      spec = "Survival" },
+    ["Readiness"]           = { class = "Hunter",      spec = "Survival" },
     -- DRUID
     ["Moonkin Form"]        = { class = "Druid",       spec = "Balance" },
+    ["Force of Nature"]     = { class = "Druid",       spec = "Balance" },
     ["Mangle (Cat)"]        = { class = "Druid",       spec = "Feral" },
     ["Mangle (Bear)"]       = { class = "Druid",       spec = "Feral" },
+    ["Feral Charge"]        = { class = "Druid",       spec = "Feral" },
     ["Swiftmend"]           = { class = "Druid",       spec = "Restoration" },
     ["Tree of Life"]        = { class = "Druid",       spec = "Restoration" },
     -- Note: Nature's Swiftness excluded — shared between Druid Resto and Shaman Resto
@@ -1659,6 +1695,12 @@ local function SaveMatch(result)
         enemyComp = enemyComp,
         result = result,
         playerName = StripRealm(UnitName("player")),
+        -- Character identity for cross-realm-safe filtering (see the
+        -- backend addon contract): (playerName, playerRealm) is the human
+        -- identity, playerGuid the stable machine identity. Distinct from
+        -- playerGuids (plural), the all-players list.
+        playerRealm = (GetNormalizedRealmName and GetNormalizedRealmName()) or GetRealmName(),
+        playerGuid = currentMatch.playerGUID,
         friendlyTeam = friendlyTeam,
         enemyTeam = enemyTeam,
         bracket = bracket,
