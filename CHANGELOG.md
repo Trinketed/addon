@@ -4,6 +4,7 @@
 > from commit messages by the packager; this file is stripped from builds.
 
 ## Latest (2026-08)
+- **Character identity on saved games:** matches now record the recording character's realm and GUID (`playerRealm`, `playerGuid`) alongside the existing realm-stripped name. This lets Trinketed's library filter by character — and tell apart two characters that share a name on different realms. No in-game UI change; only games recorded after this update carry the new fields.
 - **Open in Trinketed:** clicking a row on the Matches tab now opens a flyout with "Open in Trinketed app" and "Copy web link". The app option writes a jump intent to SavedVariables and reloads — the desktop companion picks it up on the flush, brings its window forward, and opens that game's review. The web option surfaces a `trinketed.com/goto` link pre-selected for Ctrl+C (WoW has no clipboard API). Dev mode keeps its game-id copy as a third entry. Without the companion running, the app option is a no-op reload; the web link works for everyone.
 
 ## 2026-07
