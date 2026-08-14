@@ -6,6 +6,8 @@
 ## Dependencies: Trinketed
 ## SavedVariables: TrinketedHistoryDB
 
+CompLabelsData.lua
+CompLabels.lua
 SpellDB.lua
 ReplaySpells.lua
 ReplayEngine.lua

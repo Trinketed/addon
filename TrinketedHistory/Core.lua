@@ -2331,12 +2331,24 @@ historyTabBar:SelectTab("matches")
 -- Format a comp key ("Disc Priest/Arms Warrior") into class-colored text
 local function FormatCompLabel(compKey)
     if not compKey then return "All" end
+    -- Parity with the app: class icons + its abbreviation for this class
+    -- set when one exists (CompLabels port of the app's comp registry),
+    -- class-colored names otherwise.
+    local team = {}
+    for class in compKey:gmatch("[^/]+") do
+        table.insert(team, { class = class })
+    end
+    local icons = addon.CompLabels and addon.CompLabels.KeyIcons(compKey, 12) or ""
+    local label = addon.CompLabels and addon.CompLabels.GetLabel(team)
+    if label then
+        return icons .. " " .. label
+    end
     local parts = {}
     for class in compKey:gmatch("[^/]+") do
         local color = CLASS_COLORS[class] or "ffffffff"
         table.insert(parts, "|c" .. color .. class .. "|r")
     end
-    return table.concat(parts, "/")
+    return icons .. " " .. table.concat(parts, "/")
 end
 
 ---------------------------------------------------------------------------
@@ -3219,7 +3231,8 @@ local function FormatTeamNames(team, playerName)
     local details = {}
     for _, p in ipairs(addon.SortTeam(team, playerName)) do
         local color = CLASS_COLORS[p.class] or "ffffffff"
-        table.insert(names, "|c" .. color .. p.name .. "|r")
+        local icon = addon.CompLabels and addon.CompLabels.ClassIcon(p.class, 11) or ""
+        table.insert(names, icon .. "|c" .. color .. p.name .. "|r")
         -- Build subtitle: "Spec Race" or fallback to class
         local parts = {}
         if p.spec then table.insert(parts, SPEC_SHORT[p.spec] or p.spec) end
@@ -3275,11 +3288,20 @@ end
 local function FormatEnemyTeam(game)
     local enemyStr = FormatTeamNames(game.enemyTeam)
     if enemyStr then return enemyStr end
+    local team = {}
     local parts = {}
     for _, class in ipairs(game.enemyComp or {}) do
-        table.insert(parts, ColorClass(class))
+        table.insert(team, { class = class })
+        local icon = addon.CompLabels and addon.CompLabels.ClassIcon(class, 11) or ""
+        table.insert(parts, icon .. ColorClass(class))
     end
-    return #parts > 0 and table.concat(parts, " ") or "?"
+    if #parts == 0 then return "?" end
+    -- Same comp abbreviation the Trinketed app shows for this roster.
+    local label = addon.CompLabels and addon.CompLabels.GetLabel(team)
+    if label then
+        return table.concat(parts, " ") .. "  |cff999999" .. label .. "|r"
+    end
+    return table.concat(parts, " ")
 end
 
 local rowPool = {}
