@@ -2590,8 +2590,8 @@ local BUILDER_CLASSES = {
     "Rogue", "Shaman", "Warlock", "Warrior",
 }
 
-local function BracketSlotCount()
-    return tonumber((filters.bracket or "All"):sub(1, 1)) or 5
+local function BracketSlotCount(bracketKey)
+    return tonumber(((bracketKey or filters.bracket) or "All"):sub(1, 1)) or 5
 end
 
 -- The filter's class multiset expanded to a sorted slot list.
@@ -2608,248 +2608,307 @@ end
 
 -- Clamp to the bracket's team size (overflow drops from the sorted tail,
 -- mirroring the webapp's clampToSlots) and re-derive the verb.
-local function NormalizeCompFilter(f)
-    local slots = BracketSlotCount()
+local function NormalizeCompFilter(f, bracketKey)
+    local key = bracketKey or filters.bracket
+    local slots = BracketSlotCount(key)
     local flat = CompFilterSlots(f)
     while #flat > slots do
         local cls = table.remove(flat)
         f.classes[cls] = f.classes[cls] - 1
         if f.classes[cls] <= 0 then f.classes[cls] = nil end
     end
-    f.verb = (filters.bracket ~= "All" and #flat == slots) and "exactly" or "includes"
+    f.verb = (key ~= "All" and #flat == slots) and "exactly" or "includes"
 end
 
-local function CompSummary(prefix, f)
-    local flat = CompFilterSlots(f)
-    if #flat == 0 then return prefix .. ": All" end
-    local parts = {}
-    for _, cls in ipairs(flat) do
-        table.insert(parts, addon.CompLabels.ClassIcon(cls, 12))
+---------------------------------------------------------------------------
+-- Filter Row 1: inline comp strip (webapp comp-bar twin) + Partner
+--
+-- Bracket chips with live post-switch counts, then both teams as
+-- always-visible slots at constant layout: click an empty slot for the
+-- class flyout (it keeps targeting that side's next empty slot), click
+-- a filled slot to remove it. Empty slots are wildcards; the verb stays
+-- derived. Nothing here expands or collapses — the flyout overlays.
+--
+-- Everything lives on one table: the main chunk is near Lua's 200-local
+-- limit, so no new top-level locals beyond CS itself.
+---------------------------------------------------------------------------
+local CS = { CHIP_W = 54, CHIP_H = 24, SLOT = 24, Y = -10, pickerSide = nil }
+
+-- Post-switch chip count: evaluate the full filter set as it would be
+-- AFTER clicking the chip (bracket swapped, comps clamped, verb
+-- re-derived) — the webapp's predictive counts, free here because every
+-- game is already in memory. Temporarily swaps the live filter tables so
+-- GameMatchesFilters needs no duplicate.
+function CS.PredictBracketCount(bracketKey)
+    local savedBracket = filters.bracket
+    local savedF, savedE = filters.friendlyCompFilter, filters.enemyCompFilter
+    local function cloneNormalized(f)
+        local classes = {}
+        for k, v in pairs(f.classes) do classes[k] = v end
+        local clone = { verb = "includes", classes = classes }
+        NormalizeCompFilter(clone, bracketKey)
+        return clone
     end
-    return prefix .. ": " .. table.concat(parts, "")
+    filters.bracket = bracketKey
+    filters.friendlyCompFilter = cloneNormalized(savedF)
+    filters.enemyCompFilter = cloneNormalized(savedE)
+    local n = 0
+    for _, game in ipairs(TrinketedHistoryDB and TrinketedHistoryDB.games or {}) do
+        if GameMatchesFilters(game) then n = n + 1 end
+    end
+    filters.bracket = savedBracket
+    filters.friendlyCompFilter = savedF
+    filters.enemyCompFilter = savedE
+    return n
 end
 
-local COMP_SLOT_BTN, COMP_GRID_BTN, COMP_GRID_COLS = 26, 24, 3
+function CS.FormatCount(n)
+    if n >= 10000 then return string.format("%.0fk", n / 1000) end
+    if n >= 1000 then return string.format("%.1fk", n / 1000) end
+    return tostring(n)
+end
 
-local function CreateCompSlotDropdown(parent, ddName, width, opts)
-    -- opts: labelPrefix, getFilter() -> live filter table, onChanged()
-    local dd = {}
+function CS.SideFilter(side)
+    if side == "you" then return filters.friendlyCompFilter end
+    return filters.enemyCompFilter
+end
 
-    local btn = CreateFrame("Button", ddName .. "Btn", parent)
-    btn:SetSize(width, 24)
-    dd.frame = btn
-    local btnBg = btn:CreateTexture(nil, "BACKGROUND")
-    btnBg:SetAllPoints()
-    btnBg:SetColorTexture(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
-    local bTop = btn:CreateTexture(nil, "ARTWORK")
-    bTop:SetPoint("TOPLEFT"); bTop:SetPoint("TOPRIGHT"); bTop:SetHeight(1)
-    bTop:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
-    local bBot = btn:CreateTexture(nil, "ARTWORK")
-    bBot:SetPoint("BOTTOMLEFT"); bBot:SetPoint("BOTTOMRIGHT"); bBot:SetHeight(1)
-    bBot:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
-    local bL = btn:CreateTexture(nil, "ARTWORK")
-    bL:SetPoint("TOPLEFT"); bL:SetPoint("BOTTOMLEFT"); bL:SetWidth(1)
-    bL:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
-    local bR = btn:CreateTexture(nil, "ARTWORK")
-    bR:SetPoint("TOPRIGHT"); bR:SetPoint("BOTTOMRIGHT"); bR:SetWidth(1)
-    bR:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
-
-    local lbl = btn:CreateFontString(nil, "OVERLAY")
-    lbl:SetFont(lib.FONT_BODY, 10, "")
-    lbl:SetPoint("LEFT", 6, 0)
-    lbl:SetPoint("RIGHT", -16, 0)
-    lbl:SetJustifyH("LEFT")
-    lbl:SetWordWrap(false)
-    lbl:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
-    local arrow = btn:CreateFontString(nil, "OVERLAY")
-    arrow:SetFont(lib.FONT_MONO, 8, "")
-    arrow:SetPoint("RIGHT", -4, 0)
-    arrow:SetText("v")
-    arrow:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-
-    function dd:RefreshLabel()
-        lbl:SetText(CompSummary(opts.labelPrefix, opts.getFilter()))
+function CS.SideChanged(side)
+    if side == "you" then
+        filters.partners = {}
+    else
+        filters.enemyPlayers = {}
+        filters.enemyRaces = {}
     end
-    dd:RefreshLabel()
+    RefreshHistory()
+end
 
-    local bdrop = CreateFrame("Button", nil, UIParent)
-    bdrop:SetFrameStrata("FULLSCREEN")
-    bdrop:SetAllPoints(UIParent)
-    bdrop:Hide()
-    bdrop:SetScript("OnClick", function() dd:Close() end)
-
-    local gridRows = math.ceil(#BUILDER_CLASSES / COMP_GRID_COLS)
-    local popW = math.max(5 * (COMP_SLOT_BTN + 4) + 12,
-        COMP_GRID_COLS * (COMP_GRID_BTN + 6) + 12)
-    local slotsY = -24
-    local gridY = slotsY - COMP_SLOT_BTN - 8
-    local popup = CreateFrame("Frame", ddName .. "Pop", UIParent)
-    popup:SetFrameStrata("FULLSCREEN_DIALOG")
-    popup:SetClampedToScreen(true)
-    popup:SetSize(popW, 24 + COMP_SLOT_BTN + 8 + gridRows * (COMP_GRID_BTN + 6) + 30)
-    local popBg = popup:CreateTexture(nil, "BACKGROUND")
-    popBg:SetAllPoints()
-    popBg:SetColorTexture(C.sidebarBg[1], C.sidebarBg[2], C.sidebarBg[3], 1)
-    local pTop = popup:CreateTexture(nil, "ARTWORK")
-    pTop:SetPoint("TOPLEFT"); pTop:SetPoint("TOPRIGHT"); pTop:SetHeight(1)
-    pTop:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
-    local pBot = popup:CreateTexture(nil, "ARTWORK")
-    pBot:SetPoint("BOTTOMLEFT"); pBot:SetPoint("BOTTOMRIGHT"); pBot:SetHeight(1)
-    pBot:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
-    local pL = popup:CreateTexture(nil, "ARTWORK")
-    pL:SetPoint("TOPLEFT"); pL:SetPoint("BOTTOMLEFT"); pL:SetWidth(1)
-    pL:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
-    local pR = popup:CreateTexture(nil, "ARTWORK")
-    pR:SetPoint("TOPRIGHT"); pR:SetPoint("BOTTOMRIGHT"); pR:SetWidth(1)
-    pR:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
-    popup:Hide()
-
-    local title = popup:CreateFontString(nil, "OVERLAY")
-    title:SetFont(lib.FONT_MONO, 9, "")
-    title:SetPoint("TOPLEFT", 8, -8)
-    title:SetText(opts.labelPrefix:upper())
-    title:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-
-    local clearBtn = CreateFrame("Button", nil, popup)
-    clearBtn:SetSize(40, 14)
-    clearBtn:SetPoint("TOPRIGHT", -8, -6)
-    local clearTxt = clearBtn:CreateFontString(nil, "OVERLAY")
-    clearTxt:SetFont(lib.FONT_BODY, 9, "")
-    clearTxt:SetPoint("RIGHT")
-    clearTxt:SetText("clear")
-    clearTxt:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-    clearBtn:SetScript("OnClick", function()
-        local f = opts.getFilter()
-        for k in pairs(f.classes) do f.classes[k] = nil end
-        NormalizeCompFilter(f)
-        dd:Render(); dd:RefreshLabel(); opts.onChanged()
+-- Bracket chips (radio, ALL included — the webapp's chips).
+CS.chips = {}
+for i, key in ipairs({ "2v2", "3v3", "5v5", "All" }) do
+    local c = CreateFrame("Button", nil, matchesContainer)
+    c:SetSize(CS.CHIP_W, CS.CHIP_H)
+    c:SetPoint("TOPLEFT", 12 + (i - 1) * (CS.CHIP_W + 3), CS.Y)
+    local bg = c:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
+    c.border = {}
+    for _, e in ipairs({
+        { "TOPLEFT", "TOPRIGHT", true }, { "BOTTOMLEFT", "BOTTOMRIGHT", true },
+        { "TOPLEFT", "BOTTOMLEFT", false }, { "TOPRIGHT", "BOTTOMRIGHT", false },
+    }) do
+        local t = c:CreateTexture(nil, "ARTWORK")
+        t:SetPoint(e[1]); t:SetPoint(e[2])
+        if e[3] then t:SetHeight(1) else t:SetWidth(1) end
+        table.insert(c.border, t)
+    end
+    c.txt = c:CreateFontString(nil, "OVERLAY")
+    c.txt:SetFont(lib.FONT_MONO, 9, "")
+    c.txt:SetPoint("CENTER")
+    local hl = c:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+    c:SetScript("OnClick", function()
+        filters.bracket = key
+        NormalizeCompFilter(filters.friendlyCompFilter)
+        NormalizeCompFilter(filters.enemyCompFilter)
+        RefreshHistory()
     end)
+    CS.chips[i] = { frame = c, key = key }
+end
 
-    local function mutate(fn)
-        local f = opts.getFilter()
-        fn(f)
-        NormalizeCompFilter(f)
-        dd:Render(); dd:RefreshLabel(); opts.onChanged()
+CS.youLbl = matchesContainer:CreateFontString(nil, "OVERLAY")
+CS.youLbl:SetFont(lib.FONT_MONO, 9, "")
+CS.youLbl:SetText("YOU")
+CS.youLbl:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+CS.vsLbl = matchesContainer:CreateFontString(nil, "OVERLAY")
+CS.vsLbl:SetFont(lib.FONT_MONO, 9, "")
+CS.vsLbl:SetText("vs")
+CS.vsLbl:SetTextColor(C.textMuted[1], C.textMuted[2], C.textMuted[3])
+
+-- Class-picker flyout: one shared popup anchored to the clicked slot.
+CS.pickerObj = {}
+
+CS.pickerBdrop = CreateFrame("Button", nil, UIParent)
+CS.pickerBdrop:SetFrameStrata("FULLSCREEN")
+CS.pickerBdrop:SetAllPoints(UIParent)
+CS.pickerBdrop:Hide()
+CS.pickerBdrop:SetScript("OnClick", function() CS.pickerObj:Close() end)
+
+CS.picker = CreateFrame("Frame", "TkCompPickerPop", UIParent)
+CS.picker:SetFrameStrata("FULLSCREEN_DIALOG")
+CS.picker:SetClampedToScreen(true)
+CS.picker:SetSize(3 * 30 + 12, 3 * 30 + 12 + 16)
+do
+    local bg = CS.picker:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(C.sidebarBg[1], C.sidebarBg[2], C.sidebarBg[3], 1)
+    for _, e in ipairs({
+        { "TOPLEFT", "TOPRIGHT", true }, { "BOTTOMLEFT", "BOTTOMRIGHT", true },
+        { "TOPLEFT", "BOTTOMLEFT", false }, { "TOPRIGHT", "BOTTOMRIGHT", false },
+    }) do
+        local t = CS.picker:CreateTexture(nil, "ARTWORK")
+        t:SetPoint(e[1]); t:SetPoint(e[2])
+        if e[3] then t:SetHeight(1) else t:SetWidth(1) end
+        t:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
     end
-
-    local slotBtns = {}
-    for i = 1, 5 do
-        local s = CreateFrame("Button", nil, popup)
-        s:SetSize(COMP_SLOT_BTN, COMP_SLOT_BTN)
-        s:SetPoint("TOPLEFT", 8 + (i - 1) * (COMP_SLOT_BTN + 4), slotsY)
-        s:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        local sBg = s:CreateTexture(nil, "BACKGROUND")
-        sBg:SetAllPoints()
-        sBg:SetColorTexture(0, 0, 0, 0.45)
-        local sHl = s:CreateTexture(nil, "HIGHLIGHT")
-        sHl:SetAllPoints()
-        sHl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
-        s.txt = s:CreateFontString(nil, "OVERLAY")
-        s.txt:SetFont(lib.FONT_BODY, 12, "")
-        s.txt:SetPoint("CENTER")
-        s.slotIndex = i
-        -- Any click on a filled slot removes it; empty slots are just
-        -- wildcards (the grid below is the way in).
-        s:SetScript("OnClick", function(selfBtn)
-            mutate(function(f)
-                local cls = CompFilterSlots(f)[selfBtn.slotIndex]
-                if not cls then return end
-                f.classes[cls] = f.classes[cls] - 1
-                if f.classes[cls] <= 0 then f.classes[cls] = nil end
-            end)
-        end)
-        slotBtns[i] = s
-    end
-
-    for i, class in ipairs(BUILDER_CLASSES) do
-        local g = CreateFrame("Button", nil, popup)
-        g:SetSize(COMP_GRID_BTN, COMP_GRID_BTN)
-        local col = (i - 1) % COMP_GRID_COLS
-        local rowI = math.floor((i - 1) / COMP_GRID_COLS)
-        g:SetPoint("TOPLEFT", 8 + col * (COMP_GRID_BTN + 6), gridY - rowI * (COMP_GRID_BTN + 6))
-        local gHl = g:CreateTexture(nil, "HIGHLIGHT")
-        gHl:SetAllPoints()
-        gHl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
-        g.txt = g:CreateFontString(nil, "OVERLAY")
-        g.txt:SetFont(lib.FONT_BODY, 12, "")
-        g.txt:SetPoint("CENTER")
-        g.txt:SetText(addon.CompLabels.ClassIcon(class, COMP_GRID_BTN - 2))
-        g:SetScript("OnClick", function()
-            mutate(function(f)
-                if #CompFilterSlots(f) >= BracketSlotCount() then return end
-                local slug = class:lower()
-                f.classes[slug] = (f.classes[slug] or 0) + 1
-            end)
-        end)
-    end
-
-    local hint = popup:CreateFontString(nil, "OVERLAY")
-    hint:SetFont(lib.FONT_BODY, 9, "")
-    hint:SetPoint("BOTTOMLEFT", 8, 6)
-    hint:SetPoint("BOTTOMRIGHT", -8, 6)
+    local hint = CS.picker:CreateFontString(nil, "OVERLAY")
+    hint:SetFont(lib.FONT_BODY, 8, "")
+    hint:SetPoint("BOTTOMLEFT", 6, 4)
+    hint:SetPoint("BOTTOMRIGHT", -6, 4)
     hint:SetJustifyH("LEFT")
-    hint:SetWordWrap(true)
+    hint:SetText("empty slots match anyone")
     hint:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
-    hint:SetText("click a class to fill - click a slot to remove - empty slots match anyone")
+end
+CS.picker:Hide()
 
-    function dd:Render()
-        local flat = CompFilterSlots(opts.getFilter())
-        local slots = BracketSlotCount()
-        for i = 1, 5 do
-            local s = slotBtns[i]
-            if i <= slots then
-                s:Show()
-                local cls = flat[i]
-                if cls then
-                    s.txt:SetText(addon.CompLabels.ClassIcon(cls, COMP_SLOT_BTN - 4))
-                else
-                    s.txt:SetText("|cff666666+|r")
-                end
-            else
-                s:Hide()
+function CS.pickerObj:Close()
+    CS.picker:Hide()
+    CS.pickerBdrop:Hide()
+    CS.pickerSide = nil
+    if activePopup == CS.pickerObj then activePopup = nil end
+    CS.Update()
+end
+
+function CS.pickerObj:OpenFor(side, anchor)
+    if activePopup and activePopup ~= CS.pickerObj then activePopup:Close() end
+    CloseDropDownMenus()
+    CS.pickerSide = side
+    CS.picker:ClearAllPoints()
+    CS.picker:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+    CS.pickerBdrop:Show()
+    CS.picker:Show()
+    activePopup = CS.pickerObj
+    CS.Update()
+end
+
+for i, class in ipairs(BUILDER_CLASSES) do
+    local g = CreateFrame("Button", nil, CS.picker)
+    g:SetSize(24, 24)
+    g:SetPoint("TOPLEFT", 6 + ((i - 1) % 3) * 30, -6 - math.floor((i - 1) / 3) * 30)
+    local hl = g:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+    g.txt = g:CreateFontString(nil, "OVERLAY")
+    g.txt:SetFont(lib.FONT_BODY, 12, "")
+    g.txt:SetPoint("CENTER")
+    g.txt:SetText(addon.CompLabels.ClassIcon(class, 22))
+    g:SetScript("OnClick", function()
+        if not CS.pickerSide then return end
+        local f = CS.SideFilter(CS.pickerSide)
+        if #CompFilterSlots(f) >= BracketSlotCount() then return end
+        local slug = class:lower()
+        f.classes[slug] = (f.classes[slug] or 0) + 1
+        NormalizeCompFilter(f)
+        local side = CS.pickerSide
+        -- Keep filling until the team is full, then close.
+        if #CompFilterSlots(f) >= BracketSlotCount() then CS.pickerObj:Close() end
+        CS.SideChanged(side)
+    end)
+end
+
+function CS.MakeSlot(side)
+    local s = CreateFrame("Button", nil, matchesContainer)
+    s:SetSize(CS.SLOT, CS.SLOT)
+    local bg = s:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0, 0, 0, 0.45)
+    local hl = s:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+    s.txt = s:CreateFontString(nil, "OVERLAY")
+    s.txt:SetFont(lib.FONT_BODY, 12, "")
+    s.txt:SetPoint("CENTER")
+    -- Gold underline marking the slot the open picker will fill next.
+    s.target = s:CreateTexture(nil, "OVERLAY")
+    s.target:SetPoint("BOTTOMLEFT")
+    s.target:SetPoint("BOTTOMRIGHT")
+    s.target:SetHeight(2)
+    s.target:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 1)
+    s.target:Hide()
+    s:SetScript("OnEnter", function(selfBtn)
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_TOP")
+        if selfBtn.filledClass then
+            GameTooltip:SetText("Click to remove", 1, 1, 1)
+        else
+            GameTooltip:SetText("Click to add a class", 1, 1, 1)
+            GameTooltip:AddLine("Empty slots match anyone", 0.6, 0.6, 0.6)
+        end
+        GameTooltip:Show()
+    end)
+    s:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    s:SetScript("OnClick", function(selfBtn)
+        local f = CS.SideFilter(side)
+        if selfBtn.filledClass then
+            f.classes[selfBtn.filledClass] = f.classes[selfBtn.filledClass] - 1
+            if f.classes[selfBtn.filledClass] <= 0 then
+                f.classes[selfBtn.filledClass] = nil
             end
+            NormalizeCompFilter(f)
+            CS.SideChanged(side)
+        else
+            CS.pickerObj:OpenFor(side, selfBtn)
+        end
+    end)
+    return s
+end
+
+CS.slots = { you = {}, enemy = {} }
+for i = 1, 5 do
+    CS.slots.you[i] = CS.MakeSlot("you")
+    CS.slots.enemy[i] = CS.MakeSlot("enemy")
+end
+
+function CS.Update()
+    local slots = BracketSlotCount()
+    for _, chip in ipairs(CS.chips) do
+        local selected = filters.bracket == chip.key
+        local label = chip.key == "All" and "ALL" or chip.key
+        chip.frame.txt:SetText(label .. " |cff777777"
+            .. CS.FormatCount(CS.PredictBracketCount(chip.key)) .. "|r")
+        local bc = selected and C.accent or C.borderSubtle
+        for _, t in ipairs(chip.frame.border) do
+            t:SetColorTexture(bc[1], bc[2], bc[3], 1)
+        end
+        if selected then
+            chip.frame.txt:SetTextColor(C.accent[1], C.accent[2], C.accent[3])
+        else
+            chip.frame.txt:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
         end
     end
 
-    function dd:Open()
-        if activePopup and activePopup ~= dd then activePopup:Close() end
-        CloseDropDownMenus()
-        popup:ClearAllPoints()
-        popup:SetPoint("TOPLEFT", btn, "BOTTOMLEFT", 0, -2)
-        dd:Render()
-        bdrop:Show()
-        popup:Show()
-        activePopup = dd
+    local chipsEnd = 12 + 4 * (CS.CHIP_W + 3) + 6
+    CS.youLbl:ClearAllPoints()
+    CS.youLbl:SetPoint("TOPLEFT", chipsEnd, CS.Y - 8)
+    local function paint(sideSlots, f, startX, side)
+        local flat = CompFilterSlots(f)
+        for i = 1, 5 do
+            local s = sideSlots[i]
+            if i <= slots then
+                s:ClearAllPoints()
+                s:SetPoint("TOPLEFT", startX + (i - 1) * (CS.SLOT + 3), CS.Y)
+                s:Show()
+                local cls = flat[i]
+                s.filledClass = cls
+                if cls then
+                    s.txt:SetText(addon.CompLabels.ClassIcon(cls, CS.SLOT - 4))
+                else
+                    s.txt:SetText("|cff666666+|r")
+                end
+                s.target:SetShown(CS.pickerSide == side and not cls and i == #flat + 1)
+            else
+                s:Hide()
+                s.filledClass = nil
+            end
+        end
+        return startX + slots * (CS.SLOT + 3)
     end
-
-    function dd:Close()
-        popup:Hide()
-        bdrop:Hide()
-        if activePopup == dd then activePopup = nil end
-    end
-
-    btn:SetScript("OnClick", function()
-        if popup:IsShown() then dd:Close() else dd:Open() end
-    end)
-    btn:SetScript("OnEnter", function()
-        btnBg:SetColorTexture(C.bgElevated[1], C.bgElevated[2], C.bgElevated[3], 1)
-    end)
-    btn:SetScript("OnLeave", function()
-        btnBg:SetColorTexture(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
-    end)
-
-    return dd
+    local afterYou = paint(CS.slots.you, filters.friendlyCompFilter, chipsEnd + 26, "you")
+    CS.vsLbl:ClearAllPoints()
+    CS.vsLbl:SetPoint("TOPLEFT", afterYou + 4, CS.Y - 8)
+    paint(CS.slots.enemy, filters.enemyCompFilter, afterYou + 20, "enemy")
 end
-
----------------------------------------------------------------------------
--- Filter Row 1: Player Comp | Partner | Enemy Comp
----------------------------------------------------------------------------
-local friendlyCompDD = CreateCompSlotDropdown(matchesContainer, "TkCompDD", 155, {
-    labelPrefix = "You",
-    getFilter = function() return filters.friendlyCompFilter end,
-    onChanged = function() filters.partners = {}; RefreshHistory() end,
-})
-friendlyCompDD.frame:SetPoint("TOPLEFT", 12, -10)
 
 local partnerDD = CreateSearchableDropdown(matchesContainer, "TkPartDD", 155, {
     defaultLabel = "Partner: All",
@@ -2872,60 +2931,7 @@ local partnerDD = CreateSearchableDropdown(matchesContainer, "TkPartDD", 155, {
         return "Partner: " .. table.concat(t, ", ")
     end,
 })
-partnerDD.frame:SetPoint("TOPLEFT", 177, -10)
-
-local enemyCompDD = CreateCompSlotDropdown(matchesContainer, "TkECompDD", 155, {
-    labelPrefix = "Enemy",
-    getFilter = function() return filters.enemyCompFilter end,
-    onChanged = function()
-        filters.enemyPlayers = {}; filters.enemyRaces = {}
-        RefreshHistory()
-    end,
-})
-enemyCompDD.frame:SetPoint("TOPLEFT", 342, -10)
-
-local bracketDD = CreateSearchableDropdown(matchesContainer, "TkBracketDD", 120, {
-    defaultLabel = "Bracket: All",
-    getOptions = function()
-        local out = {}
-        for _, b in ipairs({ "2v2", "3v3", "5v5" }) do
-            table.insert(out, {
-                key = b,
-                text = b,
-                searchText = b:lower(),
-                isChecked = function() return filters.bracket == b end,
-            })
-        end
-        return out
-    end,
-    onToggle = function(key)
-        if filters.bracket == key then
-            filters.bracket = "All"
-        else
-            filters.bracket = key
-        end
-        -- Slot counts follow the bracket: clamp both comps (drop overflow
-        -- slots, re-derive the verb) and repaint their dropdowns.
-        NormalizeCompFilter(filters.friendlyCompFilter)
-        NormalizeCompFilter(filters.enemyCompFilter)
-        friendlyCompDD:Render(); friendlyCompDD:RefreshLabel()
-        enemyCompDD:Render(); enemyCompDD:RefreshLabel()
-        RefreshHistory()
-    end,
-    onClear = function()
-        filters.bracket = "All"
-        NormalizeCompFilter(filters.friendlyCompFilter)
-        NormalizeCompFilter(filters.enemyCompFilter)
-        friendlyCompDD:Render(); friendlyCompDD:RefreshLabel()
-        enemyCompDD:Render(); enemyCompDD:RefreshLabel()
-        RefreshHistory()
-    end,
-    getLabel = function()
-        if filters.bracket == "All" then return "Bracket: All" end
-        return "Bracket: " .. filters.bracket
-    end,
-})
-bracketDD.frame:SetPoint("TOPLEFT", 502, -10)
+partnerDD.frame:SetPoint("TOPLEFT", 573, -10)
 
 ---------------------------------------------------------------------------
 -- Filter Row 2: Enemy Players | Enemy Race | Result | Reset
@@ -3150,10 +3156,7 @@ resetBtn:SetScript("OnClick", function()
     filters.bracket = "All"
     filters.season = currentSeason
     histSearchBox:SetText("")
-    friendlyCompDD:RefreshLabel()
     partnerDD:SetLabel("Partner: All")
-    enemyCompDD:RefreshLabel()
-    bracketDD:SetLabel("Bracket: All")
     enemyPlayerDD:SetLabel("Enemy Players: All")
     enemyRaceDD:SetLabel("Race: All")
     resultDD:SetLabel("Result: All")
@@ -3943,6 +3946,7 @@ end
 scrollFrame:HookScript("OnVerticalScroll", function() historyView:Render() end)
 
 function RefreshHistory()
+    if CS and CS.Update then CS.Update() end
     local allGames = TrinketedHistoryDB and TrinketedHistoryDB.games or {}
 
     -- Apply filters — build list of {originalIndex, game} pairs, newest first
