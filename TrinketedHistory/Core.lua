@@ -1751,7 +1751,9 @@ end
 -- History Filters
 ---------------------------------------------------------------------------
 local filters = {
-    friendlyComps = {},   -- table of compKey = true for selected player comps (empty = all)
+    -- Webapp-style comp filters for both sides: class multiset + derived
+    -- verb, matched against rosters via CompLabels.RosterMatches.
+    friendlyCompFilter = { verb = "includes", classes = {} },
     partners = {},        -- table of name = true for selected partners (empty = all)
     -- Webapp-style enemy comp filter: class multiset + verb, matched
     -- against the roster via CompLabels.RosterMatches (port of the app's
@@ -2077,9 +2079,10 @@ local function GameMatchesFilters(game)
         return false
     end
     -- Player comp filter (multi-select)
-    if next(filters.friendlyComps) then
-        local comp = GetCompKey(game.friendlyTeam)
-        if not comp or not filters.friendlyComps[comp] then return false end
+    if next(filters.friendlyCompFilter.classes) then
+        if not addon.CompLabels.RosterMatches(game.friendlyTeam, filters.friendlyCompFilter) then
+            return false
+        end
     end
     -- Partners filter (multi-select)
     if next(filters.partners) then
@@ -2148,29 +2151,14 @@ local function GameMatchesFilters(game)
     return true
 end
 
-local function CollectUniqueComps(teamKey)
-    local comps = {}
-    local seen = {}
-    for _, game in ipairs(TrinketedHistoryDB and TrinketedHistoryDB.games or {}) do
-        local key = GetCompKey(game[teamKey])
-        if key and not seen[key] then
-            table.insert(comps, key)
-            seen[key] = true
-        end
-    end
-    table.sort(comps)
-    return comps
-end
-
 local function CollectUniquePartners()
     local playerName = UnitName("player")
     local partners = {}
     local seen = {}
     for _, game in ipairs(TrinketedHistoryDB and TrinketedHistoryDB.games or {}) do
         -- Scope partners to selected friendly comps if any
-        if next(filters.friendlyComps) then
-            local comp = GetCompKey(game.friendlyTeam)
-            if not comp or not filters.friendlyComps[comp] then
+        if next(filters.friendlyCompFilter.classes) then
+            if not addon.CompLabels.RosterMatches(game.friendlyTeam, filters.friendlyCompFilter) then
                 -- skip this game
             else
                 for _, p in ipairs(game.friendlyTeam or {}) do
@@ -2590,28 +2578,276 @@ local function CreateSearchableDropdown(parent, ddName, width, opts)
 end
 
 ---------------------------------------------------------------------------
+-- Comp slot builder (webapp comp-bar twin): the popup shows the team as
+-- bracket-sized slots filled from a class grid, one click per class.
+-- Empty slots are wildcards, so the verb is DERIVED, never a control: a
+-- full team under a fixed bracket filter means "exactly", anything less
+-- "includes" (CompLabels.RosterMatches consumes the filter unchanged).
+-- Spec narrowing stays webapp-only for now.
+---------------------------------------------------------------------------
+local BUILDER_CLASSES = {
+    "Druid", "Hunter", "Mage", "Paladin", "Priest",
+    "Rogue", "Shaman", "Warlock", "Warrior",
+}
+
+local function BracketSlotCount()
+    return tonumber((filters.bracket or "All"):sub(1, 1)) or 5
+end
+
+-- The filter's class multiset expanded to a sorted slot list.
+local function CompFilterSlots(f)
+    local names = {}
+    for cls in pairs(f.classes) do table.insert(names, cls) end
+    table.sort(names)
+    local out = {}
+    for _, cls in ipairs(names) do
+        for _ = 1, f.classes[cls] do table.insert(out, cls) end
+    end
+    return out
+end
+
+-- Clamp to the bracket's team size (overflow drops from the sorted tail,
+-- mirroring the webapp's clampToSlots) and re-derive the verb.
+local function NormalizeCompFilter(f)
+    local slots = BracketSlotCount()
+    local flat = CompFilterSlots(f)
+    while #flat > slots do
+        local cls = table.remove(flat)
+        f.classes[cls] = f.classes[cls] - 1
+        if f.classes[cls] <= 0 then f.classes[cls] = nil end
+    end
+    f.verb = (filters.bracket ~= "All" and #flat == slots) and "exactly" or "includes"
+end
+
+local function CompSummary(prefix, f)
+    local flat = CompFilterSlots(f)
+    if #flat == 0 then return prefix .. ": All" end
+    local parts = {}
+    for _, cls in ipairs(flat) do
+        table.insert(parts, addon.CompLabels.ClassIcon(cls, 12))
+    end
+    return prefix .. ": " .. table.concat(parts, "")
+end
+
+local COMP_SLOT_BTN, COMP_GRID_BTN, COMP_GRID_COLS = 26, 24, 3
+
+local function CreateCompSlotDropdown(parent, ddName, width, opts)
+    -- opts: labelPrefix, getFilter() -> live filter table, onChanged()
+    local dd = {}
+
+    local btn = CreateFrame("Button", ddName .. "Btn", parent)
+    btn:SetSize(width, 24)
+    dd.frame = btn
+    local btnBg = btn:CreateTexture(nil, "BACKGROUND")
+    btnBg:SetAllPoints()
+    btnBg:SetColorTexture(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
+    local bTop = btn:CreateTexture(nil, "ARTWORK")
+    bTop:SetPoint("TOPLEFT"); bTop:SetPoint("TOPRIGHT"); bTop:SetHeight(1)
+    bTop:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+    local bBot = btn:CreateTexture(nil, "ARTWORK")
+    bBot:SetPoint("BOTTOMLEFT"); bBot:SetPoint("BOTTOMRIGHT"); bBot:SetHeight(1)
+    bBot:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+    local bL = btn:CreateTexture(nil, "ARTWORK")
+    bL:SetPoint("TOPLEFT"); bL:SetPoint("BOTTOMLEFT"); bL:SetWidth(1)
+    bL:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+    local bR = btn:CreateTexture(nil, "ARTWORK")
+    bR:SetPoint("TOPRIGHT"); bR:SetPoint("BOTTOMRIGHT"); bR:SetWidth(1)
+    bR:SetColorTexture(C.borderSubtle[1], C.borderSubtle[2], C.borderSubtle[3], 1)
+
+    local lbl = btn:CreateFontString(nil, "OVERLAY")
+    lbl:SetFont(lib.FONT_BODY, 10, "")
+    lbl:SetPoint("LEFT", 6, 0)
+    lbl:SetPoint("RIGHT", -16, 0)
+    lbl:SetJustifyH("LEFT")
+    lbl:SetWordWrap(false)
+    lbl:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+    local arrow = btn:CreateFontString(nil, "OVERLAY")
+    arrow:SetFont(lib.FONT_MONO, 8, "")
+    arrow:SetPoint("RIGHT", -4, 0)
+    arrow:SetText("v")
+    arrow:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+    function dd:RefreshLabel()
+        lbl:SetText(CompSummary(opts.labelPrefix, opts.getFilter()))
+    end
+    dd:RefreshLabel()
+
+    local bdrop = CreateFrame("Button", nil, UIParent)
+    bdrop:SetFrameStrata("FULLSCREEN")
+    bdrop:SetAllPoints(UIParent)
+    bdrop:Hide()
+    bdrop:SetScript("OnClick", function() dd:Close() end)
+
+    local gridRows = math.ceil(#BUILDER_CLASSES / COMP_GRID_COLS)
+    local popW = math.max(5 * (COMP_SLOT_BTN + 4) + 12,
+        COMP_GRID_COLS * (COMP_GRID_BTN + 6) + 12)
+    local slotsY = -24
+    local gridY = slotsY - COMP_SLOT_BTN - 8
+    local popup = CreateFrame("Frame", ddName .. "Pop", UIParent)
+    popup:SetFrameStrata("FULLSCREEN_DIALOG")
+    popup:SetClampedToScreen(true)
+    popup:SetSize(popW, 24 + COMP_SLOT_BTN + 8 + gridRows * (COMP_GRID_BTN + 6) + 30)
+    local popBg = popup:CreateTexture(nil, "BACKGROUND")
+    popBg:SetAllPoints()
+    popBg:SetColorTexture(C.sidebarBg[1], C.sidebarBg[2], C.sidebarBg[3], 1)
+    local pTop = popup:CreateTexture(nil, "ARTWORK")
+    pTop:SetPoint("TOPLEFT"); pTop:SetPoint("TOPRIGHT"); pTop:SetHeight(1)
+    pTop:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+    local pBot = popup:CreateTexture(nil, "ARTWORK")
+    pBot:SetPoint("BOTTOMLEFT"); pBot:SetPoint("BOTTOMRIGHT"); pBot:SetHeight(1)
+    pBot:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+    local pL = popup:CreateTexture(nil, "ARTWORK")
+    pL:SetPoint("TOPLEFT"); pL:SetPoint("BOTTOMLEFT"); pL:SetWidth(1)
+    pL:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+    local pR = popup:CreateTexture(nil, "ARTWORK")
+    pR:SetPoint("TOPRIGHT"); pR:SetPoint("BOTTOMRIGHT"); pR:SetWidth(1)
+    pR:SetColorTexture(C.borderDefault[1], C.borderDefault[2], C.borderDefault[3], 1)
+    popup:Hide()
+
+    local title = popup:CreateFontString(nil, "OVERLAY")
+    title:SetFont(lib.FONT_MONO, 9, "")
+    title:SetPoint("TOPLEFT", 8, -8)
+    title:SetText(opts.labelPrefix:upper())
+    title:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+    local clearBtn = CreateFrame("Button", nil, popup)
+    clearBtn:SetSize(40, 14)
+    clearBtn:SetPoint("TOPRIGHT", -8, -6)
+    local clearTxt = clearBtn:CreateFontString(nil, "OVERLAY")
+    clearTxt:SetFont(lib.FONT_BODY, 9, "")
+    clearTxt:SetPoint("RIGHT")
+    clearTxt:SetText("clear")
+    clearTxt:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    clearBtn:SetScript("OnClick", function()
+        local f = opts.getFilter()
+        for k in pairs(f.classes) do f.classes[k] = nil end
+        NormalizeCompFilter(f)
+        dd:Render(); dd:RefreshLabel(); opts.onChanged()
+    end)
+
+    local function mutate(fn)
+        local f = opts.getFilter()
+        fn(f)
+        NormalizeCompFilter(f)
+        dd:Render(); dd:RefreshLabel(); opts.onChanged()
+    end
+
+    local slotBtns = {}
+    for i = 1, 5 do
+        local s = CreateFrame("Button", nil, popup)
+        s:SetSize(COMP_SLOT_BTN, COMP_SLOT_BTN)
+        s:SetPoint("TOPLEFT", 8 + (i - 1) * (COMP_SLOT_BTN + 4), slotsY)
+        s:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        local sBg = s:CreateTexture(nil, "BACKGROUND")
+        sBg:SetAllPoints()
+        sBg:SetColorTexture(0, 0, 0, 0.45)
+        local sHl = s:CreateTexture(nil, "HIGHLIGHT")
+        sHl:SetAllPoints()
+        sHl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+        s.txt = s:CreateFontString(nil, "OVERLAY")
+        s.txt:SetFont(lib.FONT_BODY, 12, "")
+        s.txt:SetPoint("CENTER")
+        s.slotIndex = i
+        -- Any click on a filled slot removes it; empty slots are just
+        -- wildcards (the grid below is the way in).
+        s:SetScript("OnClick", function(selfBtn)
+            mutate(function(f)
+                local cls = CompFilterSlots(f)[selfBtn.slotIndex]
+                if not cls then return end
+                f.classes[cls] = f.classes[cls] - 1
+                if f.classes[cls] <= 0 then f.classes[cls] = nil end
+            end)
+        end)
+        slotBtns[i] = s
+    end
+
+    for i, class in ipairs(BUILDER_CLASSES) do
+        local g = CreateFrame("Button", nil, popup)
+        g:SetSize(COMP_GRID_BTN, COMP_GRID_BTN)
+        local col = (i - 1) % COMP_GRID_COLS
+        local rowI = math.floor((i - 1) / COMP_GRID_COLS)
+        g:SetPoint("TOPLEFT", 8 + col * (COMP_GRID_BTN + 6), gridY - rowI * (COMP_GRID_BTN + 6))
+        local gHl = g:CreateTexture(nil, "HIGHLIGHT")
+        gHl:SetAllPoints()
+        gHl:SetColorTexture(C.rowHover[1], C.rowHover[2], C.rowHover[3], C.rowHover[4])
+        g.txt = g:CreateFontString(nil, "OVERLAY")
+        g.txt:SetFont(lib.FONT_BODY, 12, "")
+        g.txt:SetPoint("CENTER")
+        g.txt:SetText(addon.CompLabels.ClassIcon(class, COMP_GRID_BTN - 2))
+        g:SetScript("OnClick", function()
+            mutate(function(f)
+                if #CompFilterSlots(f) >= BracketSlotCount() then return end
+                local slug = class:lower()
+                f.classes[slug] = (f.classes[slug] or 0) + 1
+            end)
+        end)
+    end
+
+    local hint = popup:CreateFontString(nil, "OVERLAY")
+    hint:SetFont(lib.FONT_BODY, 9, "")
+    hint:SetPoint("BOTTOMLEFT", 8, 6)
+    hint:SetPoint("BOTTOMRIGHT", -8, 6)
+    hint:SetJustifyH("LEFT")
+    hint:SetWordWrap(true)
+    hint:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    hint:SetText("click a class to fill - click a slot to remove - empty slots match anyone")
+
+    function dd:Render()
+        local flat = CompFilterSlots(opts.getFilter())
+        local slots = BracketSlotCount()
+        for i = 1, 5 do
+            local s = slotBtns[i]
+            if i <= slots then
+                s:Show()
+                local cls = flat[i]
+                if cls then
+                    s.txt:SetText(addon.CompLabels.ClassIcon(cls, COMP_SLOT_BTN - 4))
+                else
+                    s.txt:SetText("|cff666666+|r")
+                end
+            else
+                s:Hide()
+            end
+        end
+    end
+
+    function dd:Open()
+        if activePopup and activePopup ~= dd then activePopup:Close() end
+        CloseDropDownMenus()
+        popup:ClearAllPoints()
+        popup:SetPoint("TOPLEFT", btn, "BOTTOMLEFT", 0, -2)
+        dd:Render()
+        bdrop:Show()
+        popup:Show()
+        activePopup = dd
+    end
+
+    function dd:Close()
+        popup:Hide()
+        bdrop:Hide()
+        if activePopup == dd then activePopup = nil end
+    end
+
+    btn:SetScript("OnClick", function()
+        if popup:IsShown() then dd:Close() else dd:Open() end
+    end)
+    btn:SetScript("OnEnter", function()
+        btnBg:SetColorTexture(C.bgElevated[1], C.bgElevated[2], C.bgElevated[3], 1)
+    end)
+    btn:SetScript("OnLeave", function()
+        btnBg:SetColorTexture(C.bgRaised[1], C.bgRaised[2], C.bgRaised[3], 1)
+    end)
+
+    return dd
+end
+
+---------------------------------------------------------------------------
 -- Filter Row 1: Player Comp | Partner | Enemy Comp
 ---------------------------------------------------------------------------
-local friendlyCompDD = CreateSearchableDropdown(matchesContainer, "TkCompDD", 155, {
-    defaultLabel = "Player Comp: All",
-    getOptions = function()
-        local out = {}
-        for _, comp in ipairs(CollectUniqueComps("friendlyTeam")) do
-            table.insert(out, { key = comp, text = FormatCompLabel(comp), searchText = comp:lower():gsub("/", " "), isChecked = function() return filters.friendlyComps[comp] == true end })
-        end
-        return out
-    end,
-    onToggle = function(key)
-        if filters.friendlyComps[key] then filters.friendlyComps[key] = nil else filters.friendlyComps[key] = true end
-        filters.partners = {}
-        RefreshHistory()
-    end,
-    onClear = function() filters.friendlyComps = {}; filters.partners = {}; RefreshHistory() end,
-    getLabel = function()
-        if not next(filters.friendlyComps) then return "Player Comp: All" end
-        local t = {}; for c in pairs(filters.friendlyComps) do table.insert(t, FormatCompLabel(c)) end
-        return "Player Comp: " .. table.concat(t, ", ")
-    end,
+local friendlyCompDD = CreateCompSlotDropdown(matchesContainer, "TkCompDD", 155, {
+    labelPrefix = "You",
+    getFilter = function() return filters.friendlyCompFilter end,
+    onChanged = function() filters.partners = {}; RefreshHistory() end,
 })
 friendlyCompDD.frame:SetPoint("TOPLEFT", 12, -10)
 
@@ -2638,114 +2874,13 @@ local partnerDD = CreateSearchableDropdown(matchesContainer, "TkPartDD", 155, {
 })
 partnerDD.frame:SetPoint("TOPLEFT", 177, -10)
 
--- Enemy comp filter, webapp-style: build a class multiset (click a class
--- to cycle none -> x1 -> x2 -> none) with an Includes/Exactly verb, or
--- stamp an observed comp as an "exactly" set via the preset rows — the
--- same class-set semantics as the app's comp bar, matched by
--- CompLabels.RosterMatches.
-local BUILDER_CLASSES = {
-    "Druid", "Hunter", "Mage", "Paladin", "Priest",
-    "Rogue", "Shaman", "Warlock", "Warrior",
-}
-
-local enemyCompDD  -- forward: option handlers refresh the open popup
-
-local function EnemyFilterSummary()
-    local f = filters.enemyCompFilter
-    if not next(f.classes) then return "Enemy Comp: All" end
-    local parts = {}
-    for _, class in ipairs(BUILDER_CLASSES) do
-        local n = f.classes[class:lower()]
-        if n then
-            local icon = addon.CompLabels.ClassIcon(class, 12)
-            table.insert(parts, icon .. (n > 1 and ("x" .. n) or ""))
-        end
-    end
-    local verb = f.verb == "exactly" and "=" or "\226\137\165"  -- ">=" glyph
-    return "Enemy: " .. verb .. " " .. table.concat(parts, " ")
-end
-
-local function StampEnemyComp(compKey)
-    local classes = {}
-    for class in compKey:gmatch("[^/]+") do
-        local slug = class:lower()
-        classes[slug] = (classes[slug] or 0) + 1
-    end
-    filters.enemyCompFilter = { verb = "exactly", classes = classes }
-end
-
-local function SameClassSet(a, b)
-    for cls, n in pairs(a) do if b[cls] ~= n then return false end end
-    for cls, n in pairs(b) do if a[cls] ~= n then return false end end
-    return true
-end
-
-enemyCompDD = CreateSearchableDropdown(matchesContainer, "TkECompDD", 155, {
-    defaultLabel = "Enemy Comp: All",
-    getOptions = function()
-        local f = filters.enemyCompFilter
-        local out = {}
-        table.insert(out, {
-            key = "__verb",
-            text = "Mode: " .. (f.verb == "exactly" and "Exactly these" or "Includes these"),
-            searchText = "mode includes exactly",
-            isChecked = function() return filters.enemyCompFilter.verb == "exactly" end,
-        })
-        for _, class in ipairs(BUILDER_CLASSES) do
-            local slug = class:lower()
-            local color = CLASS_COLORS[class] or "ffffffff"
-            local count = f.classes[slug]
-            local suffix = count == 2 and "  |cffffffffx2|r" or ""
-            table.insert(out, {
-                key = "class:" .. slug,
-                text = addon.CompLabels.ClassIcon(class, 12) .. " |c" .. color .. class .. "|r" .. suffix,
-                searchText = slug,
-                isChecked = function()
-                    return (filters.enemyCompFilter.classes[slug] or 0) > 0
-                end,
-            })
-        end
-        for _, comp in ipairs(CollectUniqueComps("enemyTeam")) do
-            table.insert(out, {
-                key = "preset:" .. comp,
-                text = FormatCompLabel(comp),
-                searchText = comp:lower():gsub("/", " "),
-                isChecked = function()
-                    local cur = filters.enemyCompFilter
-                    if cur.verb ~= "exactly" then return false end
-                    local stamp = {}
-                    for class in comp:gmatch("[^/]+") do
-                        local slug = class:lower()
-                        stamp[slug] = (stamp[slug] or 0) + 1
-                    end
-                    return SameClassSet(cur.classes, stamp)
-                end,
-            })
-        end
-        return out
-    end,
-    onToggle = function(key)
-        local f = filters.enemyCompFilter
-        if key == "__verb" then
-            f.verb = f.verb == "exactly" and "includes" or "exactly"
-        elseif key:sub(1, 6) == "class:" then
-            local slug = key:sub(7)
-            local count = (f.classes[slug] or 0) + 1
-            f.classes[slug] = count <= 2 and count or nil
-        elseif key:sub(1, 7) == "preset:" then
-            StampEnemyComp(key:sub(8))
-        end
+local enemyCompDD = CreateCompSlotDropdown(matchesContainer, "TkECompDD", 155, {
+    labelPrefix = "Enemy",
+    getFilter = function() return filters.enemyCompFilter end,
+    onChanged = function()
         filters.enemyPlayers = {}; filters.enemyRaces = {}
-        if enemyCompDD then enemyCompDD:Refresh() end
         RefreshHistory()
     end,
-    onClear = function()
-        filters.enemyCompFilter = { verb = "includes", classes = {} }
-        filters.enemyPlayers = {}; filters.enemyRaces = {}
-        if enemyCompDD then enemyCompDD:Refresh() end
-        RefreshHistory()
-    end,
-    getLabel = EnemyFilterSummary,
 })
 enemyCompDD.frame:SetPoint("TOPLEFT", 342, -10)
 
@@ -2769,9 +2904,22 @@ local bracketDD = CreateSearchableDropdown(matchesContainer, "TkBracketDD", 120,
         else
             filters.bracket = key
         end
+        -- Slot counts follow the bracket: clamp both comps (drop overflow
+        -- slots, re-derive the verb) and repaint their dropdowns.
+        NormalizeCompFilter(filters.friendlyCompFilter)
+        NormalizeCompFilter(filters.enemyCompFilter)
+        friendlyCompDD:Render(); friendlyCompDD:RefreshLabel()
+        enemyCompDD:Render(); enemyCompDD:RefreshLabel()
         RefreshHistory()
     end,
-    onClear = function() filters.bracket = "All"; RefreshHistory() end,
+    onClear = function()
+        filters.bracket = "All"
+        NormalizeCompFilter(filters.friendlyCompFilter)
+        NormalizeCompFilter(filters.enemyCompFilter)
+        friendlyCompDD:Render(); friendlyCompDD:RefreshLabel()
+        enemyCompDD:Render(); enemyCompDD:RefreshLabel()
+        RefreshHistory()
+    end,
     getLabel = function()
         if filters.bracket == "All" then return "Bracket: All" end
         return "Bracket: " .. filters.bracket
@@ -2992,7 +3140,7 @@ do
 end
 
 resetBtn:SetScript("OnClick", function()
-    filters.friendlyComps = {}
+    filters.friendlyCompFilter = { verb = "includes", classes = {} }
     filters.partners = {}
     filters.enemyCompFilter = { verb = "includes", classes = {} }
     filters.enemyPlayers = {}
@@ -3002,9 +3150,9 @@ resetBtn:SetScript("OnClick", function()
     filters.bracket = "All"
     filters.season = currentSeason
     histSearchBox:SetText("")
-    friendlyCompDD:SetLabel("Player Comp: All")
+    friendlyCompDD:RefreshLabel()
     partnerDD:SetLabel("Partner: All")
-    enemyCompDD:SetLabel("Enemy Comp: All")
+    enemyCompDD:RefreshLabel()
     bracketDD:SetLabel("Bracket: All")
     enemyPlayerDD:SetLabel("Enemy Players: All")
     enemyRaceDD:SetLabel("Race: All")
@@ -3072,7 +3220,7 @@ end
 -- (default = no comp/partner/etc. filters, and the current season).
 local function UpdateResetButton()
     local active =
-        next(filters.friendlyComps) or next(filters.partners) or
+        next(filters.friendlyCompFilter.classes) or next(filters.partners) or
         next(filters.enemyCompFilter.classes) or next(filters.enemyPlayers) or
         next(filters.enemyRaces) or next(filters.maps) or
         filters.result ~= nil or filters.bracket ~= "All" or
