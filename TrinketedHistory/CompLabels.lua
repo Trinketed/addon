@@ -143,6 +143,33 @@ local function formatGenerated(pairsIn)
     return table.concat(labels, "/")
 end
 
+---------------------------------------------------------------------------
+-- Roster matching (port of trinketed_pipeline/comps/filters.roster_matches,
+-- class-multiset part — the webapp's Includes/Exactly comp filter verbs).
+-- filter = { verb = "includes"|"exactly", classes = { ["rogue"] = 2, ... } }
+---------------------------------------------------------------------------
+function CompLabels.RosterMatches(team, filter)
+    if not filter or not filter.classes or not next(filter.classes) then
+        return true
+    end
+    local members = team or {}
+    local total = 0
+    for _, count in pairs(filter.classes) do total = total + count end
+    if filter.verb == "exactly" and #members ~= total then return false end
+    for cls, needed in pairs(filter.classes) do
+        local have = 0
+        for _, member in ipairs(members) do
+            if lowerOrNil(member.class) == cls then have = have + 1 end
+        end
+        if filter.verb == "exactly" then
+            if have ~= needed then return false end
+        elseif have < needed then
+            return false
+        end
+    end
+    return true
+end
+
 -- The comp label for a team table, or nil when unrecognised — the same
 -- answer the app's detect_comp gives for the same roster.
 function CompLabels.GetLabel(team)

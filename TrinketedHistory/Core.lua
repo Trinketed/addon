@@ -1753,7 +1753,10 @@ end
 local filters = {
     friendlyComps = {},   -- table of compKey = true for selected player comps (empty = all)
     partners = {},        -- table of name = true for selected partners (empty = all)
-    enemyComps = {},      -- table of compKey = true for selected enemy comps (empty = all)
+    -- Webapp-style enemy comp filter: class multiset + verb, matched
+    -- against the roster via CompLabels.RosterMatches (port of the app's
+    -- roster_matches). classes = { ["rogue"] = 2, ... }; empty = all.
+    enemyCompFilter = { verb = "includes", classes = {} },
     enemyPlayers = {},    -- table of name = true for selected enemy players (empty = all)
     enemyRaces = {},      -- table of race = true for selected enemy races (empty = all)
     maps = {},            -- table of map name = true for selected arenas (empty = all)
@@ -2087,9 +2090,10 @@ local function GameMatchesFilters(game)
         if not found then return false end
     end
     -- Enemy comp filter (multi-select)
-    if next(filters.enemyComps) then
-        local comp = GetCompKey(game.enemyTeam)
-        if not comp or not filters.enemyComps[comp] then return false end
+    if next(filters.enemyCompFilter.classes) then
+        if not addon.CompLabels.RosterMatches(game.enemyTeam, filters.enemyCompFilter) then
+            return false
+        end
     end
     -- Enemy players filter (multi-select)
     if next(filters.enemyPlayers) then
@@ -2194,9 +2198,8 @@ local function CollectUniqueEnemyPlayers()
     local seen = {}
     for _, game in ipairs(TrinketedHistoryDB and TrinketedHistoryDB.games or {}) do
         -- Scope to selected enemy comps if any
-        if next(filters.enemyComps) then
-            local comp = GetCompKey(game.enemyTeam)
-            if not comp or not filters.enemyComps[comp] then
+        if next(filters.enemyCompFilter.classes) then
+            if not addon.CompLabels.RosterMatches(game.enemyTeam, filters.enemyCompFilter) then
                 -- skip
             else
                 for _, p in ipairs(game.enemyTeam or {}) do
@@ -2224,9 +2227,8 @@ local function CollectUniqueEnemyRaces()
     local seen = {}
     for _, game in ipairs(TrinketedHistoryDB and TrinketedHistoryDB.games or {}) do
         -- Scope to selected enemy comps if any
-        if next(filters.enemyComps) then
-            local comp = GetCompKey(game.enemyTeam)
-            if not comp or not filters.enemyComps[comp] then
+        if next(filters.enemyCompFilter.classes) then
+            if not addon.CompLabels.RosterMatches(game.enemyTeam, filters.enemyCompFilter) then
                 -- skip
             else
                 for _, p in ipairs(game.enemyTeam or {}) do
@@ -2636,26 +2638,114 @@ local partnerDD = CreateSearchableDropdown(matchesContainer, "TkPartDD", 155, {
 })
 partnerDD.frame:SetPoint("TOPLEFT", 177, -10)
 
-local enemyCompDD = CreateSearchableDropdown(matchesContainer, "TkECompDD", 155, {
+-- Enemy comp filter, webapp-style: build a class multiset (click a class
+-- to cycle none -> x1 -> x2 -> none) with an Includes/Exactly verb, or
+-- stamp an observed comp as an "exactly" set via the preset rows — the
+-- same class-set semantics as the app's comp bar, matched by
+-- CompLabels.RosterMatches.
+local BUILDER_CLASSES = {
+    "Druid", "Hunter", "Mage", "Paladin", "Priest",
+    "Rogue", "Shaman", "Warlock", "Warrior",
+}
+
+local enemyCompDD  -- forward: option handlers refresh the open popup
+
+local function EnemyFilterSummary()
+    local f = filters.enemyCompFilter
+    if not next(f.classes) then return "Enemy Comp: All" end
+    local parts = {}
+    for _, class in ipairs(BUILDER_CLASSES) do
+        local n = f.classes[class:lower()]
+        if n then
+            local icon = addon.CompLabels.ClassIcon(class, 12)
+            table.insert(parts, icon .. (n > 1 and ("x" .. n) or ""))
+        end
+    end
+    local verb = f.verb == "exactly" and "=" or "\226\137\165"  -- ">=" glyph
+    return "Enemy: " .. verb .. " " .. table.concat(parts, " ")
+end
+
+local function StampEnemyComp(compKey)
+    local classes = {}
+    for class in compKey:gmatch("[^/]+") do
+        local slug = class:lower()
+        classes[slug] = (classes[slug] or 0) + 1
+    end
+    filters.enemyCompFilter = { verb = "exactly", classes = classes }
+end
+
+local function SameClassSet(a, b)
+    for cls, n in pairs(a) do if b[cls] ~= n then return false end end
+    for cls, n in pairs(b) do if a[cls] ~= n then return false end end
+    return true
+end
+
+enemyCompDD = CreateSearchableDropdown(matchesContainer, "TkECompDD", 155, {
     defaultLabel = "Enemy Comp: All",
     getOptions = function()
+        local f = filters.enemyCompFilter
         local out = {}
+        table.insert(out, {
+            key = "__verb",
+            text = "Mode: " .. (f.verb == "exactly" and "Exactly these" or "Includes these"),
+            searchText = "mode includes exactly",
+            isChecked = function() return filters.enemyCompFilter.verb == "exactly" end,
+        })
+        for _, class in ipairs(BUILDER_CLASSES) do
+            local slug = class:lower()
+            local color = CLASS_COLORS[class] or "ffffffff"
+            local count = f.classes[slug]
+            local suffix = count == 2 and "  |cffffffffx2|r" or ""
+            table.insert(out, {
+                key = "class:" .. slug,
+                text = addon.CompLabels.ClassIcon(class, 12) .. " |c" .. color .. class .. "|r" .. suffix,
+                searchText = slug,
+                isChecked = function()
+                    return (filters.enemyCompFilter.classes[slug] or 0) > 0
+                end,
+            })
+        end
         for _, comp in ipairs(CollectUniqueComps("enemyTeam")) do
-            table.insert(out, { key = comp, text = FormatCompLabel(comp), searchText = comp:lower():gsub("/", " "), isChecked = function() return filters.enemyComps[comp] == true end })
+            table.insert(out, {
+                key = "preset:" .. comp,
+                text = FormatCompLabel(comp),
+                searchText = comp:lower():gsub("/", " "),
+                isChecked = function()
+                    local cur = filters.enemyCompFilter
+                    if cur.verb ~= "exactly" then return false end
+                    local stamp = {}
+                    for class in comp:gmatch("[^/]+") do
+                        local slug = class:lower()
+                        stamp[slug] = (stamp[slug] or 0) + 1
+                    end
+                    return SameClassSet(cur.classes, stamp)
+                end,
+            })
         end
         return out
     end,
     onToggle = function(key)
-        if filters.enemyComps[key] then filters.enemyComps[key] = nil else filters.enemyComps[key] = true end
+        local f = filters.enemyCompFilter
+        if key == "__verb" then
+            f.verb = f.verb == "exactly" and "includes" or "exactly"
+        elseif key:sub(1, 6) == "class:" then
+            local slug = key:sub(7)
+            local count = (f.classes[slug] or 0) + 1
+            f.classes[slug] = count <= 2 and count or nil
+        elseif key:sub(1, 7) == "preset:" then
+            StampEnemyComp(key:sub(8))
+        end
         filters.enemyPlayers = {}; filters.enemyRaces = {}
+        if enemyCompDD then enemyCompDD:Refresh() end
         RefreshHistory()
     end,
-    onClear = function() filters.enemyComps = {}; filters.enemyPlayers = {}; filters.enemyRaces = {}; RefreshHistory() end,
-    getLabel = function()
-        if not next(filters.enemyComps) then return "Enemy Comp: All" end
-        local t = {}; for c in pairs(filters.enemyComps) do table.insert(t, FormatCompLabel(c)) end
-        return "Enemy Comp: " .. table.concat(t, ", ")
+    onClear = function()
+        filters.enemyCompFilter = { verb = "includes", classes = {} }
+        filters.enemyPlayers = {}; filters.enemyRaces = {}
+        if enemyCompDD then enemyCompDD:Refresh() end
+        RefreshHistory()
     end,
+    getLabel = EnemyFilterSummary,
 })
 enemyCompDD.frame:SetPoint("TOPLEFT", 342, -10)
 
@@ -2904,7 +2994,7 @@ end
 resetBtn:SetScript("OnClick", function()
     filters.friendlyComps = {}
     filters.partners = {}
-    filters.enemyComps = {}
+    filters.enemyCompFilter = { verb = "includes", classes = {} }
     filters.enemyPlayers = {}
     filters.enemyRaces = {}
     filters.maps = {}
@@ -2983,7 +3073,7 @@ end
 local function UpdateResetButton()
     local active =
         next(filters.friendlyComps) or next(filters.partners) or
-        next(filters.enemyComps) or next(filters.enemyPlayers) or
+        next(filters.enemyCompFilter.classes) or next(filters.enemyPlayers) or
         next(filters.enemyRaces) or next(filters.maps) or
         filters.result ~= nil or filters.bracket ~= "All" or
         filters.season ~= currentSeason or filters.search ~= ""
