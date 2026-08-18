@@ -3998,10 +3998,21 @@ local function OpenGameInApp(game)
         print("|cffE8B923" .. DISPLAY_NAME .. ":|r Can't reload during combat.")
         return
     end
+    -- Carry the active comp filters so the app can rebuild the webapp's
+    -- library filter on arrival. classes mirrors the webapp's repeated
+    -- yc/ec query params (frontend/src/utils/library.ts): sorted slugs,
+    -- duplicates repeated; verb is the yv/ev value. A side with no
+    -- filter is absent entirely, so older companions ignore the keys.
+    local function compIntent(f)
+        if not next(f.classes) then return nil end
+        return { classes = CompFilterSlots(f), verb = f.verb }
+    end
     TrinketedHistoryDB.jumpIntent = {
         gameId = game.id, -- nil for pre-id games; gameStartTime covers those
         gameStartTime = game.startTime,
         createdAt = time(),
+        yourComp = compIntent(filters.friendlyCompFilter),
+        enemyComp = compIntent(filters.enemyCompFilter),
     }
     print("|cff00ccff" .. DISPLAY_NAME .. ":|r Opening in Trinketed — reloading UI.")
     if C_UI and C_UI.Reload then C_UI.Reload() else ReloadUI() end
@@ -4369,6 +4380,25 @@ scrollFrame:HookScript("OnVerticalScroll", function() historyView:Render() end)
 
 function RefreshHistory()
     if CS and CS.Update then CS.Update() end
+
+    -- Persist the comp/bracket filter state so it survives /reload — every
+    -- filter mutation funnels through here, making this the one choke
+    -- point. Snapshot copies, not references: Reset and the bracket chips
+    -- replace the live comp tables, which would strand an aliased saved
+    -- table on the old one. Restored in ADDON_LOADED.
+    if TrinketedHistoryDB and TrinketedHistoryDB.settings then
+        local function snapComp(f)
+            local classes = {}
+            for cls, n in pairs(f.classes) do classes[cls] = n end
+            return { verb = f.verb, classes = classes }
+        end
+        TrinketedHistoryDB.settings.historyFilters = {
+            bracket = filters.bracket,
+            friendlyComp = snapComp(filters.friendlyCompFilter),
+            enemyComp = snapComp(filters.enemyCompFilter),
+        }
+    end
+
     local allGames = TrinketedHistoryDB and TrinketedHistoryDB.games or {}
 
     -- Apply filters — build list of {originalIndex, game} pairs, newest first
@@ -6291,6 +6321,36 @@ frame:SetScript("OnEvent", function(self, event, ...)
             TrinketedHistoryDB.minimap = TrinketedHistoryDB.minimap or { minimapPos = 220, hide = false }
             TrinketedHistoryDB.settings = TrinketedHistoryDB.settings or { showTimestamp = true }
             TrinketedHistoryDB.settings.hiddenReplayCDs = TrinketedHistoryDB.settings.hiddenReplayCDs or {}
+
+            -- Restore the Matches tab's persisted filter state (comp
+            -- slots + bracket; written by RefreshHistory). Mutating the
+            -- filters table is enough — the chip/slot visuals re-read it
+            -- on every panel open (OnShow → RefreshHistory → CS.Update).
+            -- Season is deliberately not persisted: it re-defaults to the
+            -- live season on every panel open (seasonDefault:Apply), and
+            -- a stale saved season would fight that.
+            local savedHF = TrinketedHistoryDB.settings.historyFilters
+            if savedHF then
+                if savedHF.bracket == "2v2" or savedHF.bracket == "3v3"
+                    or savedHF.bracket == "5v5" or savedHF.bracket == "All" then
+                    filters.bracket = savedHF.bracket
+                end
+                local slugOK = {}
+                for _, c in ipairs(BUILDER_CLASSES) do slugOK[c:lower()] = true end
+                local function restoreComp(saved, f)
+                    if type(saved) ~= "table" or type(saved.classes) ~= "table" then return end
+                    for cls, n in pairs(saved.classes) do
+                        if slugOK[cls] and type(n) == "number" and n >= 1 then
+                            f.classes[cls] = math.floor(n)
+                        end
+                    end
+                    -- Clamps to the restored bracket and re-derives the
+                    -- verb, exactly as a live edit would.
+                    NormalizeCompFilter(f)
+                end
+                restoreComp(savedHF.friendlyComp, filters.friendlyCompFilter)
+                restoreComp(savedHF.enemyComp, filters.enemyCompFilter)
+            end
             -- A jump intent only matters for the flush that immediately
             -- follows its click (the companion consumes it once). Clear any
             -- leftover so it ages out of the file on the next flush.
