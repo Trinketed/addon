@@ -216,6 +216,36 @@ local trinketLastStart = {}  -- GUID → last startTime from ARENA_COOLDOWNS_UPD
 local lastTargets = {}       -- unit → targetGUID cache for change detection
 local UpdateOverlayVisibility  -- forward declaration
 
+-- Recording resilience: fallback triggers so games aren't silently lost when
+-- a single event is missed, plus post-save scoreboard patching for MMR that
+-- arrives after the save fired. One table-valued local (200-locals limit).
+-- Functions are attached after SaveMatch (they need the lifecycle upvalues).
+local resil = {
+    prepWatch = nil,      -- ticker while IN_ARENA_PREP (gates-open watchdog)
+    prepEnteredAt = nil,  -- GetTime() when we entered IN_ARENA_PREP
+    lastSaved = nil,      -- saved game record still missing scoreboard MMR
+    patchTicker = nil,    -- post-save scoreboard retry ticker
+    patchTries = 0,
+    recovered = false,    -- once-per-session login/reload recovery has run
+}
+
+-- Locale/zone-name independent arena check. ARENA_ZONES stays for display
+-- names, but detection must not depend on GetRealZoneText being fresh.
+function resil.InArena()
+    local inInstance, instanceType = IsInInstance()
+    return inInstance and instanceType == "arena"
+end
+
+-- Event capture runs from arena ENTRY, not from gates-open detection
+-- (ArenaReplay-style record-then-rebase): during IN_ARENA_PREP events are
+-- buffered on an entry-relative clock, and StartRecording rebases them to
+-- the gate. Detection failing can then never lose a game — only where t=0
+-- lands is derived. This predicate gates every capture path.
+function resil.Capturing()
+    return (state == "RECORDING" or state == "IN_ARENA_PREP")
+        and currentMatch ~= nil
+end
+
 ---------------------------------------------------------------------------
 -- Debug
 ---------------------------------------------------------------------------
@@ -915,7 +945,7 @@ local function OnCLEU()
     local srcGUID, srcName, srcFlags, srcRaidFlags = info[4], info[5], info[6], info[7]
     local dstGUID, dstName, dstFlags, dstRaidFlags = info[8], info[9], info[10], info[11]
 
-    if state ~= "RECORDING" then return end
+    if not resil.Capturing() then return end
 
     -- Try to discover unknown GUIDs
     if srcGUID and not relevantGUIDs[srcGUID] then DiscoverPlayerByGUID(srcGUID) end
@@ -1309,7 +1339,7 @@ local function PollPlayerCooldowns(t)
 end
 
 local function PollAllUnits()
-    if state ~= "RECORDING" then return end
+    if not resil.Capturing() then return end
 
     local t = GetRelativeTime()
 
@@ -1321,11 +1351,26 @@ local function PollAllUnits()
     PollPlayerCooldowns(t)
 end
 
+-- Capture tickers run from arena entry (record-then-rebase), not from
+-- gates-open — started by InitMatch and the reload-recovery prep restore,
+-- canceled by ResetMatchState.
+function resil.StartCaptureTickers()
+    if pollTicker then pollTicker:Cancel() end
+    if snapshotTicker then snapshotTicker:Cancel() end
+    pollTicker = C_Timer.NewTicker(0.2, PollAllUnits)
+    -- Periodic re-snapshot for stealth players
+    snapshotTicker = C_Timer.NewTicker(2, function()
+        if resil.Capturing() then
+            SnapshotRoster()
+        end
+    end)
+end
+
 ---------------------------------------------------------------------------
 -- Target/Focus Change Events
 ---------------------------------------------------------------------------
 local function OnUnitTarget(unit)
-    if state ~= "RECORDING" then return end
+    if not resil.Capturing() then return end
     local guid = UnitGUID(unit)
     if not guid or not IsRelevantGUID(guid) then return end
 
@@ -1346,7 +1391,7 @@ local function OnUnitTarget(unit)
 end
 
 local function OnFocusChanged()
-    if state ~= "RECORDING" then return end
+    if not resil.Capturing() then return end
     local guid = UnitGUID("player")
     local focusGUID = UnitGUID("focus")
     local focusName = UnitName("focus")
@@ -1364,7 +1409,7 @@ end
 -- Loss of Control
 ---------------------------------------------------------------------------
 local function OnLossOfControl()
-    if state ~= "RECORDING" then return end
+    if not resil.Capturing() then return end
     if not C_LossOfControl or not C_LossOfControl.GetActiveLossOfControlData then return end
 
     local numEvents = C_LossOfControl.GetNumEvents and C_LossOfControl.GetNumEvents() or 0
@@ -1398,6 +1443,17 @@ local function ResetMatchState()
     gatesOpenTime = nil
     ratingsBefore = nil
     hadPrepBuff = false
+    -- A result from a previous match must never leak into the next one: a
+    -- stale pendingSave would let the next UPDATE_BATTLEFIELD_SCORE fire a
+    -- bogus mid-game save that truncates the real game.
+    pendingSave = nil
+    resil.prepEnteredAt = nil
+    if resil.prepWatch then
+        resil.prepWatch:Cancel()
+        resil.prepWatch = nil
+    end
+    -- The match is over (saved or discarded) — drop the crash/reload copy
+    if TrinketedHistoryDB then TrinketedHistoryDB.inFlight = nil end
     wipe(prevUnitState)
     wipe(prevAuraSnapshot)
     prevCooldownSig = nil
@@ -1429,11 +1485,20 @@ local function InitMatch()
         enemyMMR = nil,
         roster = {},
         events = {},
+        -- Epoch of arena entry: the provisional clock anchor while events
+        -- buffer during prep, and what reload recovery re-anchors from.
+        -- Not part of the saved record (SaveMatch copies fields explicitly).
+        entryTime = GetEpochTime(),
     }
     relevantGUIDs = {}
     guidToRoster = {}
     drState = {}
     lastTargets = {}
+    -- Capture starts NOW (record-then-rebase): entry-relative clock,
+    -- rebased to the gate by StartRecording.
+    gatesOpenTime = GetTime()
+    resil.StartCaptureTickers()
+    resil.SyncInFlight()
 end
 
 ---------------------------------------------------------------------------
@@ -1457,7 +1522,7 @@ local petTrack = {
 }
 
 function petTrack:Scan()
-    if state ~= "RECORDING" then return end
+    if not resil.Capturing() then return end
     for ownerUnit, petUnit in pairs(self.UNITS) do
         local petGUID = UnitGUID(petUnit)
         if petGUID then
@@ -1477,16 +1542,46 @@ function petTrack:Scan()
     end
 end
 
-local function StartRecording()
+local function StartRecording(gateAt)
+    -- Promote the entry-relative capture to gate-relative recording.
+    -- `gateAt` (GetTime domain) is when the gates opened: nil means "this
+    -- instant" (the live buff-removal / first-hostile-CLEU paths); the
+    -- derived-late paths (watchdog, winner recovery, zone-exit salvage)
+    -- pass resil.DeriveGate()'s answer. Rebasing the buffer makes the
+    -- saved record identical to when detection fires live.
     state = "RECORDING"
-    gatesOpenTime = GetTime()
-    currentMatch.startTime = GetEpochTime()
+    if resil.prepWatch then
+        resil.prepWatch:Cancel()
+        resil.prepWatch = nil
+    end
+    local entryAnchor = gatesOpenTime or GetTime()
+    gatesOpenTime = gateAt or GetTime()
+    local offset = gatesOpenTime - entryAnchor
+
+    -- Rebase the prep-room buffer: shift entry-relative timestamps to
+    -- gate-relative, dropping pre-gate events — today's saved shape.
+    if offset ~= 0 and currentMatch.events and #currentMatch.events > 0 then
+        local rebased = {}
+        for _, ev in ipairs(currentMatch.events) do
+            local t = (ev.t or 0) - offset
+            if t >= 0 then
+                ev.t = t
+                rebased[#rebased + 1] = ev
+            end
+        end
+        currentMatch.events = rebased
+    end
+
+    -- Both clocks anchored at the gate, not at this call: the derived-late
+    -- paths promote after the fact, and startTime is the VOD-sync anchor.
     -- Server clock alongside the client clock: startTime comes from time()
     -- captured once at addon load (drifts over long sessions, sub-second
     -- digits untrustworthy). The pair lets external tools measure the
     -- client/server delta while keeping the client clock — the one video
     -- recordings are stamped with — for VOD matching.
-    currentMatch.serverStartTime = GetServerTime and GetServerTime() or nil
+    local sinceGate = GetTime() - gatesOpenTime
+    currentMatch.startTime = GetEpochTime() - sinceGate
+    currentMatch.serverStartTime = GetServerTime and (GetServerTime() - sinceGate) or nil
 
     -- Snapshot ratings
     ratingsBefore = SnapshotAllRatings()
@@ -1494,27 +1589,20 @@ local function StartRecording()
     -- Snapshot roster
     SnapshotRoster()
 
-    -- Emit gates_open
-    AppendEvent({ t = 0, type = "gates_open" })
+    -- Emit gates_open as the first event (post-rebase survivors keep order)
+    table.insert(currentMatch.events, 1, { t = 0, type = "gates_open" })
 
-    -- Record pets that already exist at the gates (no SPELL_SUMMON in-log)
+    -- Record pets that already exist at the gates (no SPELL_SUMMON in-log;
+    -- prep-buffer pet_owner events were dropped by the rebase)
     wipe(petTrack.seen)
     petTrack:Scan()
-
-    -- Start 200ms polling
-    pollTicker = C_Timer.NewTicker(0.2, PollAllUnits)
-
-    -- Periodic re-snapshot for stealth players
-    snapshotTicker = C_Timer.NewTicker(2, function()
-        if state == "RECORDING" then
-            SnapshotRoster()
-        end
-    end)
 
     -- Enable advanced combat logging
     if SetCVar then
         SetCVar("advancedCombatLogging", "1")
     end
+
+    resil.SyncInFlight()
 
     local rosterCount = 0
     for _ in pairs(currentMatch.roster) do rosterCount = rosterCount + 1 end
@@ -1534,7 +1622,9 @@ local function SaveMatch(result)
 
     state = "SAVING"
 
-    currentMatch.endTime = GetEpochTime()
+    -- salvageEndTime: set when saving a match recovered from a previous
+    -- session — the clock must end at the last captured event, not "now"
+    currentMatch.endTime = currentMatch.salvageEndTime or GetEpochTime()
     currentMatch.result = result
     currentMatch.duration = gatesOpenTime and (GetTime() - gatesOpenTime) or 0
 
@@ -1556,73 +1646,9 @@ local function SaveMatch(result)
         end
     end
 
-    -- Fallback: try GetBattlefieldScore for ratingChange from scoreboard
-    if not currentMatch.ratingChange and GetBattlefieldScore then
-        local playerName = StripRealm(UnitName("player"))
-        local numScores = GetNumBattlefieldScores and GetNumBattlefieldScores() or 0
-        for si = 1, numScores do
-            local name, _, _, _, _, _, _, _, _, _, _, bgRating, ratingChange = GetBattlefieldScore(si)
-            if name and StripRealm(name) == playerName and ratingChange and ratingChange ~= 0 then
-                currentMatch.ratingBefore = currentMatch.ratingBefore or (bgRating or 0)
-                currentMatch.ratingChange = ratingChange
-                currentMatch.ratingAfter = (currentMatch.ratingBefore or 0) + ratingChange
-                dbg("  Rating (scoreboard fallback):", currentMatch.ratingBefore, "change:", ratingChange)
-                break
-            end
-        end
-    end
-
-    -- MMR from scoreboard (captured independently of how rating was obtained).
-    -- Legacy column order: ...rating(12) ratingChange(13) preMatchMMR(14) mmrChange(15)
-    if GetBattlefieldScore and GetNumBattlefieldScores then
-        local playerName = StripRealm(UnitName("player"))
-        local numScores = GetNumBattlefieldScores() or 0
-        for si = 1, numScores do
-            local name, _, _, _, _, _, _, _, _, _, _, _, _, preMatchMMR, mmrChange = GetBattlefieldScore(si)
-            if name and StripRealm(name) == playerName and preMatchMMR and preMatchMMR > 0 then
-                currentMatch.mmrBefore = math.floor(preMatchMMR + 0.5)
-                currentMatch.mmrChange = math.floor((mmrChange or 0) + 0.5)
-                currentMatch.mmrAfter = currentMatch.mmrBefore + currentMatch.mmrChange
-                dbg("  MMR (scoreboard):", currentMatch.mmrBefore, "change:", currentMatch.mmrChange)
-                break
-            end
-        end
-    end
-
-    -- Per-player rating + MMR + scoreboard stats.
-    -- Legacy column order: name(1) killingBlows(2) honorableKills(3) deaths(4)
-    -- ... damageDone(10) healingDone(11) rating(12) ratingChange(13)
-    -- preMatchMMR(14) mmrChange(15)
-    if GetBattlefieldScore and GetNumBattlefieldScores then
-        local numScores = GetNumBattlefieldScores() or 0
-        for si = 1, numScores do
-            local name, killingBlows, _, deaths, _, _, _, _, _, damageDone, healingDone, _, ratingChange, preMatchMMR, mmrChange = GetBattlefieldScore(si)
-            if name then
-                local cleanName = StripRealm(name)
-                for guid, entry in pairs(currentMatch.roster) do
-                    if entry.name == cleanName then
-                        entry.ratingChange = ratingChange
-                        if preMatchMMR and preMatchMMR > 0 then
-                            entry.mmr = math.floor(preMatchMMR + 0.5)
-                            entry.mmrChange = math.floor((mmrChange or 0) + 0.5)
-                        end
-                        entry.kbs = killingBlows
-                        entry.deaths = deaths
-                        entry.damage = damageDone
-                        entry.healing = healingDone
-                    end
-                end
-            end
-        end
-    end
-
-    -- Derive enemy team MMR from any enemy roster entry that has one
-    for guid, entry in pairs(currentMatch.roster) do
-        if entry.team == "enemy" and entry.mmr and entry.mmr > 0 then
-            currentMatch.enemyMMR = entry.mmr
-            break
-        end
-    end
+    -- Scoreboard data (rating fallback, MMR, per-player stats) is applied to
+    -- the saved record below via resil.ApplyScoreboard — and re-applied after
+    -- the save if the server hadn't populated the columns yet.
 
     -- Emit match_end event
     AppendEvent({ t = GetRelativeTime(), type = "match_end", winner = result })
@@ -1684,7 +1710,7 @@ local function SaveMatch(result)
     if not season or season == 0 then season = 1 end
 
     -- Save to TrinketedHistoryDB
-    table.insert(TrinketedHistoryDB.games, {
+    local record = {
         id = GenerateGameId(),
         startTime = currentMatch.startTime,
         endTime = currentMatch.endTime,
@@ -1713,7 +1739,17 @@ local function SaveMatch(result)
         mmrChange = currentMatch.mmrChange,
         enemyMMR = currentMatch.enemyMMR,
         eventLog = compressedEventLog,
-    })
+    }
+    if currentMatch.salvageEndTime then record.serverEndTime = nil end
+    table.insert(TrinketedHistoryDB.games, record)
+
+    -- Apply scoreboard data now; if the server hasn't populated the MMR
+    -- columns yet (save fired from the fallback timer or a zone-out), keep
+    -- retrying against the live scoreboard until it lands or we leave.
+    -- Outside the arena the scoreboard is unreadable — don't bother.
+    if not resil.ApplyScoreboard(record) and resil.InArena() then
+        resil.ArmPatch(record)
+    end
 
     -- Flush combat log between games
     LoggingCombat(false)
@@ -1725,17 +1761,17 @@ local function SaveMatch(result)
     local count = #TrinketedHistoryDB.games
     local eventCount = #currentMatch.events
     local ratingStr = ""
-    if currentMatch.ratingChange then
-        local sign = currentMatch.ratingChange >= 0 and "+" or ""
-        local color = currentMatch.ratingChange >= 0 and "|cff00ff00" or "|cffff0000"
-        ratingStr = " " .. color .. "(" .. sign .. currentMatch.ratingChange .. " rating, " ..
-            (currentMatch.ratingBefore or "?") .. "→" .. (currentMatch.ratingAfter or "?") .. ")|r"
+    if record.ratingChange then
+        local sign = record.ratingChange >= 0 and "+" or ""
+        local color = record.ratingChange >= 0 and "|cff00ff00" or "|cffff0000"
+        ratingStr = " " .. color .. "(" .. sign .. record.ratingChange .. " rating, " ..
+            (record.ratingBefore or "?") .. "→" .. (record.ratingAfter or "?") .. ")|r"
     end
     local mmrStr = ""
-    if currentMatch.mmrBefore then
-        mmrStr = " |cff888888[MMR " .. currentMatch.mmrBefore ..
-            (currentMatch.mmrChange and currentMatch.mmrChange ~= 0
-                and string.format(" (%+d)", currentMatch.mmrChange) or "") .. "]|r"
+    if record.mmrBefore then
+        mmrStr = " |cff888888[MMR " .. record.mmrBefore ..
+            (record.mmrChange and record.mmrChange ~= 0
+                and string.format(" (%+d)", record.mmrChange) or "") .. "]|r"
     end
     print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. ratingStr .. mmrStr ..
         " | " .. eventCount .. " events | " .. string.format("%.1fs", currentMatch.duration))
@@ -1744,6 +1780,392 @@ local function SaveMatch(result)
     if UpdateSyncNudge then UpdateSyncNudge() end
 
     ResetMatchState()
+end
+
+---------------------------------------------------------------------------
+-- Recording resilience (functions for the `resil` state table above)
+---------------------------------------------------------------------------
+
+-- Read the live scoreboard into a saved game record: player rating fallback,
+-- player MMR, per-player stats, enemy team MMR. Safe to call repeatedly —
+-- only fills what the scoreboard actually has. Returns true once the
+-- player's MMR was found (the signal that the columns are populated).
+-- Legacy column order: name(1) killingBlows(2) honorableKills(3) deaths(4)
+-- ... damageDone(10) healingDone(11) rating(12) ratingChange(13)
+-- preMatchMMR(14) mmrChange(15)
+function resil.ApplyScoreboard(game)
+    if not (GetBattlefieldScore and GetNumBattlefieldScores) then
+        return true -- API missing: retrying can never succeed, stop
+    end
+    local playerName = game.playerName
+    local numScores = GetNumBattlefieldScores() or 0
+    local gotMMR = false
+    for si = 1, numScores do
+        local name, killingBlows, _, deaths, _, _, _, _, _, damageDone,
+            healingDone, bgRating, ratingChange, preMatchMMR, mmrChange = GetBattlefieldScore(si)
+        if name then
+            local cleanName = StripRealm(name)
+
+            if cleanName == playerName then
+                if not game.ratingChange and ratingChange and ratingChange ~= 0 then
+                    game.ratingBefore = game.ratingBefore or (bgRating or 0)
+                    game.ratingChange = ratingChange
+                    game.ratingAfter = (game.ratingBefore or 0) + ratingChange
+                    dbg("  Rating (scoreboard fallback):", game.ratingBefore, "change:", ratingChange)
+                end
+                if preMatchMMR and preMatchMMR > 0 then
+                    game.mmrBefore = math.floor(preMatchMMR + 0.5)
+                    game.mmrChange = math.floor((mmrChange or 0) + 0.5)
+                    game.mmrAfter = game.mmrBefore + game.mmrChange
+                    gotMMR = true
+                    dbg("  MMR (scoreboard):", game.mmrBefore, "change:", game.mmrChange)
+                end
+            end
+
+            for _, team in ipairs({ game.friendlyTeam, game.enemyTeam }) do
+                for _, entry in ipairs(team or {}) do
+                    if entry.name == cleanName then
+                        entry.ratingChange = ratingChange
+                        if preMatchMMR and preMatchMMR > 0 then
+                            entry.mmr = math.floor(preMatchMMR + 0.5)
+                            entry.mmrChange = math.floor((mmrChange or 0) + 0.5)
+                        end
+                        entry.kbs = killingBlows
+                        entry.deaths = deaths
+                        entry.damage = damageDone
+                        entry.healing = healingDone
+                    end
+                end
+            end
+        end
+    end
+
+    if not game.enemyMMR then
+        for _, entry in ipairs(game.enemyTeam or {}) do
+            if entry.mmr and entry.mmr > 0 then
+                game.enemyMMR = entry.mmr
+                break
+            end
+        end
+    end
+
+    return gotMMR
+end
+
+function resil.ClearPatch()
+    resil.lastSaved = nil
+    resil.patchTries = 0
+    if resil.patchTicker then
+        resil.patchTicker:Cancel()
+        resil.patchTicker = nil
+    end
+end
+
+function resil.TryPatch()
+    local game = resil.lastSaved
+    if not game then return end
+    if resil.ApplyScoreboard(game) then
+        local mmrStr = tostring(game.mmrBefore)
+        if game.mmrChange and game.mmrChange ~= 0 then
+            mmrStr = mmrStr .. string.format(" (%+d)", game.mmrChange)
+        end
+        print("|cff00ccff" .. DISPLAY_NAME .. ":|r MMR captured: |cff888888" .. mmrStr .. "|r")
+        resil.ClearPatch()
+    end
+end
+
+-- Keep asking the server for scoreboard data after a save that had no MMR.
+-- Runs until the data lands, ~20s pass, or we leave the arena (the
+-- scoreboard is only readable inside).
+function resil.ArmPatch(game)
+    resil.ClearPatch()
+    resil.lastSaved = game
+    resil.patchTicker = C_Timer.NewTicker(1, function()
+        resil.patchTries = resil.patchTries + 1
+        if not resil.lastSaved or resil.patchTries > 20 then
+            resil.ClearPatch()
+            return
+        end
+        if RequestBattlefieldScoreData then RequestBattlefieldScoreData() end
+        resil.TryPatch()
+    end)
+end
+
+-- First hostile player-vs-player interaction in the buffered events — by
+-- definition possible only after the gates opened, so it bounds the gate
+-- from above. Returns a GetTime-domain moment for StartRecording(gateAt),
+-- or nil when the buffer holds no combat to derive from.
+function resil.DeriveGate()
+    if not currentMatch or not currentMatch.events then return nil end
+    for _, ev in ipairs(currentMatch.events) do
+        if (ev.type == "damage" or ev.type == "miss")
+            and ev.srcGUID and ev.dstGUID and ev.srcGUID ~= ev.dstGUID
+            and ev.srcGUID:find("^Player%-") and ev.dstGUID:find("^Player%-") then
+            return gatesOpenTime + (ev.t or 0)
+        end
+    end
+    return nil
+end
+
+-- Gates-open watchdog: UNIT_AURA can be missed, and a player who loads in
+-- after the gates opened (long loading screen, DC during prep) never sees
+-- the prep buff at all — without this, that game is silently discarded on
+-- zone-out. Runs only while IN_ARENA_PREP.
+function resil.StartPrepWatch()
+    resil.prepEnteredAt = GetTime()
+    if resil.prepWatch then resil.prepWatch:Cancel() end
+    resil.prepWatch = C_Timer.NewTicker(2, function()
+        if state ~= "IN_ARENA_PREP" then
+            if resil.prepWatch then resil.prepWatch:Cancel(); resil.prepWatch = nil end
+            return
+        end
+        -- Re-stamp the map if GetRealZoneText was stale at zone-in
+        if currentMatch and not ARENA_ZONES[currentMatch.map] then
+            local z = GetRealZoneText()
+            if z and z ~= "" then currentMatch.map = z end
+        end
+        if HasPrepBuff() then return end
+        if hadPrepBuff then
+            dbg("Prep watchdog: buff gone without UNIT_AURA — starting recording")
+            StartRecording()
+        elseif GetTime() - (resil.prepEnteredAt or 0) > 8 then
+            dbg("Prep watchdog: no prep buff after grace period — assuming gates already open")
+            print("|cff00ccff" .. DISPLAY_NAME .. ":|r No prep buff detected — assuming game in progress. Recording started.")
+            -- Late join: combat already buffered pins the gate better than
+            -- "now" (which is entry + grace, not the real gate)
+            StartRecording(resil.DeriveGate())
+        end
+    end)
+end
+
+-- Persist the live match to SavedVariables. SavedVariables flush to disk on
+-- every /reload and logout — exactly the moments the in-memory state would
+-- otherwise be lost — so a mid-game reload can restore and CONTINUE the
+-- same recording instead of starting a fragment. Holds references: events
+-- appended later are included in the flush automatically; only state and
+-- ratings need re-syncing when they change. Cleared by ResetMatchState.
+function resil.SyncInFlight()
+    if not TrinketedHistoryDB or not currentMatch then return end
+    TrinketedHistoryDB.inFlight = {
+        match = currentMatch,
+        state = state,
+        ratingsBefore = ratingsBefore,
+    }
+end
+
+-- Rebuild the GUID lookup tables (and pet dedup) from a restored match
+function resil.RebuildIndexes(m)
+    relevantGUIDs = {}
+    guidToRoster = {}
+    for guid, entry in pairs(m.roster or {}) do
+        relevantGUIDs[guid] = true
+        guidToRoster[guid] = entry
+    end
+    wipe(petTrack.seen)
+    for _, ev in ipairs(m.events or {}) do
+        if ev.type == "pet_owner" and ev.petGUID then
+            relevantGUIDs[ev.petGUID] = true
+            petTrack.seen[ev.petGUID] = ev.ownerGUID
+        end
+    end
+end
+
+-- Continue a recording interrupted by /reload: same match table, same
+-- startTime, all events preserved — only the tickers and the relative
+-- clock anchor are rebuilt.
+function resil.ResumeRecording(flight)
+    currentMatch = flight.match
+    ratingsBefore = flight.ratingsBefore
+    resil.RebuildIndexes(currentMatch)
+    state = "RECORDING"
+    hadPrepBuff = false
+    -- Re-anchor the relative clock: startTime is the gates-open epoch
+    gatesOpenTime = GetTime() - (GetEpochTime() - currentMatch.startTime)
+    SnapshotRoster()
+    petTrack:Scan()
+    resil.StartCaptureTickers()
+    if SetCVar then SetCVar("advancedCombatLogging", "1") end
+    LoggingCombat(true)
+    resil.SyncInFlight()
+    UpdateOverlayVisibility()
+    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Reload detected — resumed recording ("
+        .. #(currentMatch.events or {}) .. " events preserved).")
+end
+
+-- Save a match that was in flight when the previous session ended (logout,
+-- crash, or a reload whose exit was never seen). Uses the normal SaveMatch
+-- path by restoring the lifecycle upvalues — but only while IDLE, so a live
+-- match is never clobbered; otherwise it retries after the current one.
+function resil.SalvageInFlight(flight)
+    if state ~= "IDLE" then
+        C_Timer.After(30, function() resil.SalvageInFlight(flight) end)
+        return
+    end
+    local m = flight.match
+    if not m or not m.startTime then return end
+    currentMatch = m
+    ratingsBefore = flight.ratingsBefore
+    resil.RebuildIndexes(m)
+    -- End the clock at the last captured event, not at "now"
+    local lastT = 0
+    for _, ev in ipairs(m.events or {}) do
+        if ev.t and ev.t > lastT then lastT = ev.t end
+    end
+    gatesOpenTime = GetTime() - lastT
+    m.salvageEndTime = m.startTime + lastT
+    -- The result was never observed; infer it from rating movement if the
+    -- server has sent rated info by now, else count it a loss (same default
+    -- as a zone-exit save).
+    local result = "LOSS"
+    if ratingsBefore then
+        local now = SnapshotAllRatings()
+        for i = 1, 3 do
+            local b, a = ratingsBefore[i] or 0, now[i] or 0
+            if b > 0 and a > 0 and a ~= b then
+                result = (a > b) and "WIN" or "LOSS"
+                break
+            end
+        end
+    end
+    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Recovered unfinished game from previous session ("
+        .. #(m.events or {}) .. " events).")
+    SaveMatch(result)
+end
+
+-- Login/reload recovery, run once per session from the first
+-- PLAYER_ENTERING_WORLD (world + aura data are loaded by then, unlike
+-- ADDON_LOADED). Consumes the persisted in-flight match: resume it if we're
+-- still standing in the same game, salvage-save it if that game is over,
+-- and fall back to the fresh prep/recording recovery when there is nothing
+-- to restore (e.g. a crash that never flushed SavedVariables).
+function resil.Recover()
+    if not TrinketedHistoryDB then return end
+    local flight = TrinketedHistoryDB.inFlight
+    TrinketedHistoryDB.inFlight = nil
+    local zone = GetRealZoneText()
+    local inArena = ARENA_ZONES[zone] or resil.InArena()
+
+    if flight and flight.match and flight.state == "RECORDING" and flight.match.startTime then
+        local age = GetEpochTime() - flight.match.startTime
+        -- Same still-running game iff we're in an arena with the gates open
+        -- (prep buff means a NEW game — you never have it mid-match) and the
+        -- record is recent enough to be this match.
+        if inArena and not HasPrepBuff() and age < 1800 then
+            resil.ResumeRecording(flight)
+            return
+        end
+        -- That game is over (or unrecognizable): save what was captured.
+        -- Small delay so the server has sent rated info for result inference.
+        if RequestRatedInfo then RequestRatedInfo() end
+        C_Timer.After(5, function() resil.SalvageInFlight(flight) end)
+        -- fall through: if we ARE in an arena, it's a new game — set up below
+    end
+
+    if not inArena or state ~= "IDLE" then return end
+
+    state = "IN_ARENA_PREP"
+    if flight and flight.state == "IN_ARENA_PREP" and flight.match then
+        -- Reloaded in the prep room: keep the roster and event buffer
+        -- already gathered. Re-anchor the entry-relative clock so the
+        -- buffered timestamps stay continuous across the reload.
+        currentMatch = flight.match
+        resil.RebuildIndexes(currentMatch)
+        gatesOpenTime = GetTime()
+            - (GetEpochTime() - (currentMatch.entryTime or GetEpochTime()))
+        resil.StartCaptureTickers()
+        resil.SyncInFlight()
+    else
+        InitMatch()
+        if zone and zone ~= "" then currentMatch.map = zone end
+    end
+    LoggingCombat(true)
+
+    if HasPrepBuff() then
+        hadPrepBuff = true
+        resil.StartPrepWatch()
+        dbg("Reload recovery: in prep room")
+        print("|cff00ccff" .. DISPLAY_NAME .. ":|r Reload detected — in arena prep room.")
+    else
+        -- Gates already open with nothing to resume: record what remains
+        StartRecording()
+        dbg("Reload recovery: game in progress, no restorable state")
+        print("|cff00ccff" .. DISPLAY_NAME .. ":|r Reload detected — arena game in progress. Resuming tracking.")
+    end
+    UpdateOverlayVisibility()
+end
+
+-- Single idempotent zone check driven by both ZONE_CHANGED_NEW_AREA and
+-- PLAYER_ENTERING_WORLD. Either event alone can be missed or fire with
+-- stale zone text around loading screens; running the same logic from both
+-- (with instance-type detection, not zone names) means one missed event no
+-- longer loses a game or wedges the state machine.
+function resil.CheckZone(event)
+    -- Nothing is trusted until the once-per-session recovery has run: the
+    -- first PLAYER_ENTERING_WORLD of a session is by definition the
+    -- login/reload one, and it consumes the persisted in-flight match.
+    -- Acting on any zone event before that could overwrite it.
+    if not resil.recovered then
+        if event == "PLAYER_ENTERING_WORLD" then
+            resil.recovered = true
+            resil.Recover()
+        end
+        return
+    end
+
+    if resil.InArena() then
+        -- Salvage: entering an arena through a loading screen while still
+        -- RECORDING means the previous match's exit was never seen. Save it
+        -- rather than staying wedged and losing this game and every next one.
+        -- Only on PLAYER_ENTERING_WORLD — there is no loading screen inside a
+        -- match, so ZONE_CHANGED noise can never trigger a mid-game save here.
+        -- (Login/reload PEW never reaches here; it returns above.)
+        if event == "PLAYER_ENTERING_WORLD" and state == "RECORDING" then
+            dbg("Zone check: entered arena while still RECORDING — salvaging previous match")
+            SaveMatch(pendingSave or "LOSS")
+        end
+
+        if state == "IDLE" then
+            state = "IN_ARENA_PREP"
+            resil.ClearPatch()
+            InitMatch()
+
+            -- Request fresh rating data
+            if RequestRatedInfo then RequestRatedInfo() end
+
+            -- Enable advanced combat logging
+            if SetCVar then
+                SetCVar("advancedCombatLogging", "1")
+            end
+            LoggingCombat(true)
+
+            resil.StartPrepWatch()
+            print("|cff00ccff" .. DISPLAY_NAME .. ":|r Entered " .. (currentMatch.map or "arena") .. " — waiting for gates...")
+        end
+    else
+        if state == "RECORDING" then
+            -- Left arena mid-recording: use the already-detected winner
+            -- if UPDATE_BATTLEFIELD_STATUS saw one, else count it a loss
+            SaveMatch(pendingSave or "LOSS")
+        elseif state == "IN_ARENA_PREP" then
+            -- Gates were never detected, but capture ran from entry: if the
+            -- buffer holds real combat, the game happened — derive the gate
+            -- and save instead of discarding (the old lost-game path).
+            -- A combat-free buffer (never left the prep room) is discarded
+            -- exactly as before.
+            local gate = resil.DeriveGate()
+            if gate then
+                dbg("Zone exit from prep with buffered combat — salvaging via derived gate")
+                StartRecording(gate)
+                SaveMatch(pendingSave or "LOSS")
+            else
+                ResetMatchState()
+            end
+        end
+        -- Scoreboard is unreadable outside the arena — stop any MMR retry
+        resil.ClearPatch()
+        LoggingCombat(false)
+    end
+    UpdateOverlayVisibility()
 end
 
 
@@ -5843,6 +6265,7 @@ end  -- Share / Import section
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("UNIT_AURA")
 frame:RegisterEvent("ARENA_OPPONENT_UPDATE")
 frame:RegisterEvent("UPDATE_BATTLEFIELD_STATUS")
@@ -5902,67 +6325,20 @@ frame:SetScript("OnEvent", function(self, event, ...)
             print("|cff00ccff" .. DISPLAY_NAME .. ":|r Loaded — |cffE8B923Season " .. currentSeason .. "|r | " ..
                 seasonGames .. " games this season, " .. #TrinketedHistoryDB.games .. " total.")
 
-            -- Recover state if we reloaded mid-arena
-            local zone = GetRealZoneText()
-            if ARENA_ZONES[zone] then
-                if state == "IDLE" then
-                    state = "IN_ARENA_PREP"
-                    InitMatch()
-                    currentMatch.map = zone
-                    LoggingCombat(true)
-
-                    -- Check if gates already opened (no prep buff = game in progress)
-                    local hasBuff = HasPrepBuff()
-                    if hasBuff then
-                        hadPrepBuff = true
-                        dbg("Reload recovery: in prep room")
-                        print("|cff00ccff" .. DISPLAY_NAME .. ":|r Reload detected — in arena prep room.")
-                    else
-                        -- Gates already opened, game is in progress
-                        StartRecording()
-                        dbg("Reload recovery: game in progress")
-                        print("|cff00ccff" .. DISPLAY_NAME .. ":|r Reload detected — arena game in progress. Resuming tracking.")
-                    end
-                    UpdateOverlayVisibility()
-                end
-            end
+            -- Recovery of a match interrupted by reload/crash/logout runs
+            -- from the login/reload PLAYER_ENTERING_WORLD (see
+            -- resil.CheckZone → resil.Recover): world and aura data aren't
+            -- reliably loaded yet at ADDON_LOADED time.
         end
 
     -----------------------------------------------------------------
-    -- ZONE_CHANGED_NEW_AREA
+    -- ZONE_CHANGED_NEW_AREA / PLAYER_ENTERING_WORLD — arena entry/exit.
+    -- Both drive the same idempotent check: either event alone can be
+    -- missed (or carry stale zone text) around loading screens.
     -----------------------------------------------------------------
-    elseif event == "ZONE_CHANGED_NEW_AREA" then
-        local zone = GetRealZoneText()
-        dbg("ZONE_CHANGED_NEW_AREA:", zone)
-
-        if ARENA_ZONES[zone] then
-            if state == "IDLE" then
-                state = "IN_ARENA_PREP"
-                InitMatch()
-                currentMatch.map = zone
-
-                -- Request fresh rating data
-                if RequestRatedInfo then RequestRatedInfo() end
-
-                -- Enable advanced combat logging
-                if SetCVar then
-                    SetCVar("advancedCombatLogging", "1")
-                end
-                LoggingCombat(true)
-
-                print("|cff00ccff" .. DISPLAY_NAME .. ":|r Entered " .. zone .. " — waiting for gates...")
-            end
-        else
-            if state == "RECORDING" then
-                -- Left arena mid-recording: use the already-detected winner
-                -- if UPDATE_BATTLEFIELD_STATUS saw one, else count it a loss
-                SaveMatch(pendingSave or "LOSS")
-            elseif state == "IN_ARENA_PREP" then
-                ResetMatchState()
-            end
-            LoggingCombat(false)
-            UpdateOverlayVisibility()
-        end
+    elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        dbg(event .. ":", GetRealZoneText())
+        resil.CheckZone(event)
 
     -----------------------------------------------------------------
     -- UNIT_AURA — gates open detection
@@ -5999,6 +6375,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         UpdateOverlayVisibility()
         TrackQueueStatus()
 
+        -- Match ended before we ever detected the gates opening (missed prep
+        -- transitions on a very short game): promote the buffered capture —
+        -- the combat is already recorded, only t=0 needs deriving.
+        if state == "IN_ARENA_PREP" and GetBattlefieldWinner() then
+            dbg("Winner detected while still in prep state — promoting buffered capture")
+            StartRecording(resil.DeriveGate())
+        end
+
         if state ~= "RECORDING" then return end
 
         local winner = GetBattlefieldWinner()
@@ -6027,7 +6411,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
     -- UPDATE_BATTLEFIELD_SCORE — best time to save (scoreboard ready)
     -----------------------------------------------------------------
     elseif event == "UPDATE_BATTLEFIELD_SCORE" then
-        if not pendingSave then return end
+        -- A game already saved without MMR: the scoreboard just updated,
+        -- try to fill it in now.
+        if resil.lastSaved then resil.TryPatch() end
+
+        if not pendingSave or state ~= "RECORDING" then return end
 
         if RequestRatedInfo then RequestRatedInfo() end
         C_Timer.After(0.5, function()
@@ -6042,13 +6430,25 @@ frame:SetScript("OnEvent", function(self, event, ...)
     -- COMBAT_LOG_EVENT_UNFILTERED
     -----------------------------------------------------------------
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
+        -- Gates-open fallback: hostile combat between two different players
+        -- can only happen after the gates open. Catches games where both the
+        -- prep-buff transition and the watchdog would fire late/never.
+        if state == "IN_ARENA_PREP" then
+            local _, subevent, _, srcGUID, _, _, _, dstGUID = CombatLogGetCurrentEventInfo()
+            if (DAMAGE_SUBEVENTS[subevent] or MISS_SUBEVENTS[subevent])
+                and srcGUID and dstGUID and srcGUID ~= dstGUID
+                and srcGUID:find("^Player%-") and dstGUID:find("^Player%-") then
+                dbg("Gates fallback: player-vs-player combat during prep — starting recording")
+                StartRecording()
+            end
+        end
         OnCLEU()
 
     -----------------------------------------------------------------
     -- UNIT_SPELLCAST_SUCCEEDED — spec detection + friendly trinket
     -----------------------------------------------------------------
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-        if state ~= "RECORDING" then return end
+        if not resil.Capturing() then return end
         local unit, _, spellID = ...
         if not unit or not spellID then return end
         local guid = UnitGUID(unit)
@@ -6093,6 +6493,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "PVP_RATED_STATS_UPDATE" then
         if state == "IN_ARENA_PREP" and not ratingsBefore then
             ratingsBefore = SnapshotAllRatings()
+            resil.SyncInFlight()
             dbg("Pre-match ratings (async):", ratingsBefore and ratingsBefore[1], ratingsBefore and ratingsBefore[2])
         end
 
@@ -6125,8 +6526,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
             local unitID = "arena" .. i
             local spellID, itemID, startTime, duration = C_PvP.GetArenaCrowdControlInfo(unitID)
             if spellID and startTime and startTime ~= 0 and duration and duration ~= 0 then
-                if state ~= "RECORDING" or not currentMatch then
-                    -- skip: not recording
+                if not resil.Capturing() then
+                    -- skip: not capturing
                 else
                     local guid = UnitGUID(unitID)
                     if guid and not relevantGUIDs[guid] then
@@ -6225,6 +6626,11 @@ local function RegisterSubCommands()
         print("  combatLogging:", tostring(LoggingCombat()))
         print("  state:", state)
         print("  hadPrepBuff:", tostring(hadPrepBuff))
+        print("  inArena (instance):", tostring(resil.InArena()))
+        print("  pendingSave:", tostring(pendingSave))
+        print("  prepWatch:", resil.prepWatch and "active" or "off")
+        print("  mmrPatch:", resil.lastSaved and ("waiting (try " .. resil.patchTries .. ")") or "idle")
+        print("  inFlight (persisted):", TrinketedHistoryDB.inFlight and (TrinketedHistoryDB.inFlight.state or "?") or "none")
         if currentMatch then
             print("  startTime:", tostring(currentMatch.startTime))
             local rosterCount = 0
