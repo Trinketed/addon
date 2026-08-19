@@ -2,9 +2,7 @@
 ## Title: Trinketed
 ## Notes: Arena suite for TBC Anniversary realms — party cooldowns, match history, and in-game replays
 ## X-Website: https://trinketed.com
-# Uncomment with the real id once the CurseForge project exists (packager
-# uploads to CurseForge only when this is set):
-# ## X-Curse-Project-ID: 000000
+## X-Curse-Project-ID: 1658913
 ## Author: apwek
 ## Version: @project-version@
 ## SavedVariables: TrinketedDB
