@@ -1,4 +1,4 @@
-## Interface: 110207
+## Interface: 20505
 ## Title: Trinketed - Lose Control
 ## Notes: Loss-of-control aura swipe over unit frames (CC, silence, root, disarm, interrupts)
 ## Author: apwek

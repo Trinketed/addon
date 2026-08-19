@@ -1,4 +1,4 @@
-## Interface: 110207
+## Interface: 20505
 ## Title: Trinketed - Line of Sight
 ## Notes: Relays "target not in line of sight" errors to allies running the addon so they can reposition
 ## Author: apwek

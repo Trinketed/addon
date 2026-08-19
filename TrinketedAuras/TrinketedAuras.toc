@@ -1,4 +1,4 @@
-## Interface: 110207
+## Interface: 20505
 ## Title: Trinketed - Auras
 ## Notes: Personal buff/debuff tracker: configurable icon groups with duration, stacks and swipe
 ## Author: apwek

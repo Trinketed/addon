@@ -1,4 +1,4 @@
-## Interface: 110207
+## Interface: 20505
 ## Title: Trinketed - History
 ## Notes: Arena match history and VOD timestamps
 ## Author: apwek
