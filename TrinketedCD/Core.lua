@@ -254,6 +254,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
             addon:ScanPartyMembers()
             addon:ScanPetOwners()
             addon:RefreshAllBars()
+        elseif IsInRaid() then
+            addon:ScanPartyMembers() -- raid branch tears down party bars
         end
 
     elseif event == "GROUP_ROSTER_UPDATE" then
@@ -262,6 +264,11 @@ frame:SetScript("OnEvent", function(self, event, ...)
             addon:ScanPetOwners()
             addon:RefreshAllBars()
             addon:ScheduleReanchor()
+        elseif IsInRaid() then
+            -- Joining/converting to a raid outside arena: without this the
+            -- guard above skipped ScanPartyMembers entirely, so its raid
+            -- teardown never ran and stale bars stayed on screen frozen.
+            addon:ScanPartyMembers()
         end
 
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then

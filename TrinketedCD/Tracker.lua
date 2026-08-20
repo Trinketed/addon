@@ -24,6 +24,7 @@ function addon:ScanPartyMembers()
         for i = 1, 4 do
             self.state.unitMap["party" .. i] = nil
         end
+        wipe(self.state.petOwnerMap)
         return
     end
 
