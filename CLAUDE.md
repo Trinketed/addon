@@ -67,7 +67,7 @@ junctions are the delivery path, not the packaged build.
 
 No local build step needed for testing (junctions). The BigWigsMods packager runs in CI:
 
-- **Auto-tag:** every push to `main` triggers `auto-tag.yml` → bumps patch tag (`RELEASE_TOKEN` PAT, org-level secret)
+- **Auto-tag:** a push to `main` triggers `auto-tag.yml` → bumps patch tag (`RELEASE_TOKEN` PAT, org-level secret). Pushes touching *only* build-stripped paths (`**.md`, `docs/`, `tools/`, `.claude/`, `.github/`, `.gitignore`, `addons.json`) are skipped via `paths-ignore` — they'd produce a byte-identical build. A mixed docs+code push still tags. To release an ignored-only change, push a tag by hand. Keep that list in sync with `pkgmeta.yaml`'s `ignore` when either changes.
 - **Release:** the new tag triggers `release.yml` → `BigWigsMods/packager@v2 -g retail` → GitHub Release (CurseForge upload activates once `CF_API_KEY` secret and `## X-Curse-Project-ID` in `Trinketed.toc` exist)
 - **Version placeholder:** `.toc` files use `@project-version@` — never hardcode versions
 - `pkgmeta.yaml`: externals (LibStub, LibDeflate, DRList-1.0 — committed copies in `Libs/` exist for dev, replaced from upstream at build time), `move-folders` hoists shipped modules to siblings, `ignore` strips dev files + local-only modules

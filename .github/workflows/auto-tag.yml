@@ -4,6 +4,20 @@ on:
   push:
     branches:
       - main
+    # Don't cut a version for changes that can't reach users. These paths are
+    # all stripped from builds by pkgmeta.yaml's ignore list, so a release built
+    # from them is byte-identical to the previous one — it only burns a version
+    # number and pushes a redundant CurseForge file. A push touching any other
+    # path still tags as before, including a mixed docs+code push. To force a
+    # release for an ignored-only change, push a tag by hand.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tools/**'
+      - '.claude/**'
+      - '.github/**'
+      - '.gitignore'
+      - 'addons.json'
 
 jobs:
   tag:
