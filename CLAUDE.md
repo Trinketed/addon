@@ -27,6 +27,42 @@ Dev machines junction the game's AddOns folders directly into this checkout (`C:
 - Windows git has no committer identity configured — run git via WSL (`/mnt/c/dev/Trinketed`).
 - Addons report version `"dev"` from checkouts; real versions are stamped only in packaged builds.
 
+### First suspect when a fix "doesn't work": the junctions
+
+The junctions are load-bearing and they can be silently replaced. The
+CurseForge app treats Trinketed as an installable addon (project 1658913)
+and will overwrite `Trinketed`, `TrinketedCD`, and `TrinketedHistory` with
+a packaged release, turning junctions back into ordinary folders. The game
+then loads that frozen copy and every edit in this checkout is invisible —
+which presents as "my fix didn't work", not as "my addon isn't loading",
+and reliably burns an hour. This has happened at least once (2026-08-20,
+client pinned at v0.1.43 while `main` had moved on).
+
+Before debugging any behaviour that contradicts the source, prove the game
+is loading this checkout:
+
+```bash
+powershell.exe -NoProfile -Command "Get-ChildItem 'C:\Program Files (x86)\World of Warcraft\_anniversary_\Interface\AddOns' | Where-Object Name -like 'Trinketed*' | Select-Object Name, LinkType, LinkTarget"
+```
+
+Every module must show `LinkType: Junction`. A blank `LinkType` is a real
+folder — a stale copy. Or grep the game path for a line you just wrote;
+if it is missing, you are not testing your code.
+
+To repair, close WoW, move the stale folders aside, and recreate the links
+(no admin needed; core points at the repo **root**, modules at their
+subfolders). `cmd.exe /c mklink` mangles quoting through WSL interop — use
+PowerShell:
+
+```bash
+powershell.exe -NoProfile -Command "New-Item -ItemType Junction -Path 'C:\Program Files (x86)\World of Warcraft\_anniversary_\Interface\AddOns\TrinketedCD' -Target 'C:\dev\Trinketed\TrinketedCD'"
+```
+
+Folder identity changed, so restart the client fully rather than `/reload`.
+SavedVariables live under `WTF\` and are unaffected. Keep Trinketed
+unsubscribed in the CurseForge app on dev machines — on a dev box the
+junctions are the delivery path, not the packaged build.
+
 ## Build & Release
 
 No local build step needed for testing (junctions). The BigWigsMods packager runs in CI:
