@@ -23,6 +23,10 @@ every arena game you play.
   out of your rated list), season, or free-text search.
 - **Share strings**: `/trinketed share` exports a match; anyone with the
   addon can `/trinketed import` it and watch the replay.
+- **Switching from ArenaAnalytics?** One click in the History settings
+  imports your whole ArenaAnalytics record — results, ratings, rosters,
+  match types — so your history comes with you. (Imported games have no
+  replay; replays exist only for games Trinketed records live.)
 
 ## Party cooldowns (TrinketedCD)
 

@@ -8,6 +8,7 @@ Arena match history, in-game replays, and VOD timestamps. Part of the [Trinketed
 - Automatically records every arena match (2v2, 3v3, 5v5) — no setup
 - Tracks teams, specs, races, ratings, rating/MMR changes, duration, and per-player scoreboard stats (killing blows, deaths, damage, healing)
 - Skirmishes are detected and labelled, so rating-less games are never mistaken for rated ones
+- One-click ArenaAnalytics import (Settings tab): brings your existing history along — results, ratings, rosters, match types. Imported games have no replay (replays exist only for games Trinketed records live) and show an Imported tag instead
 - Filterable by comp, partner, enemy comp, enemy player, enemy race, map, bracket, match type (rated/skirmish), season, result — plus free-text search (player/class/race/map terms, all must match)
 - Queue timer: prints how long the queue took when it pops
 

@@ -2648,7 +2648,7 @@ local function GameMatchesFilters(game)
                     add(p.name); add(p.class); add(p.spec); add(p.race)
                 end
             end
-            add(game.map); add(game.bracket); add(game.matchType)
+            add(game.map); add(game.bracket); add(game.matchType); add(game.imported)
             hay = table.concat(parts, " "):lower()
             searchTextCache[game] = hay
         end
@@ -4372,6 +4372,26 @@ function historyView:MakeRow()
         end
     end)
 
+    -- Imported games (ArenaAnalytics migration) have no replay to offer,
+    -- so the action column explains itself instead of going blank.
+    row.importedTag = CreateFrame("Button", nil, row)
+    row.importedTag:SetSize(50, 30)
+    row.importedTag:SetPoint("LEFT", 686, 0)
+    row.importedTag.txt = row.importedTag:CreateFontString(nil, "OVERLAY")
+    row.importedTag.txt:SetFont(lib.FONT_BODY, 9, "")
+    row.importedTag.txt:SetPoint("CENTER")
+    row.importedTag.txt:SetText("Imported")
+    row.importedTag.txt:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    row.importedTag:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Imported from ArenaAnalytics")
+        GameTooltip:AddLine("No replay for this game: replays exist only for"
+            .. " games Trinketed records live.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    row.importedTag:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    row.importedTag:Hide()
+
     -- Alternating background
     row.bg = row:CreateTexture(nil, "BACKGROUND")
     row.bg:SetAllPoints()
@@ -4391,6 +4411,9 @@ function historyView:MakeRow()
             GameTooltip:AddDoubleLine("id", g.id or "(none — pre-id game)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             GameTooltip:AddDoubleLine("db index", tostring(self.dbIndex), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             GameTooltip:AddDoubleLine("matchType", g.matchType or "(undetected)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            if g.imported then
+                GameTooltip:AddDoubleLine("imported", g.imported, 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            end
             GameTooltip:AddDoubleLine("eventLog", g.eventLog and (#g.eventLog .. " chars") or "(none)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             GameTooltip:AddDoubleLine("startTime", tostring(g.startTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             if g.serverStartTime then
@@ -4422,6 +4445,8 @@ function historyView:Populate(row, i, game)
 
     if game.result == "WIN" then
         row.result:SetText("|cff00ff00WIN|r")
+    elseif game.result == "DRAW" then -- imports only; live recording never saves one
+        row.result:SetText("|cffcccc66DRAW|r")
     else
         row.result:SetText("|cffff0000LOSS|r")
     end
@@ -4453,9 +4478,11 @@ function historyView:Populate(row, i, game)
     if game.eventLog then
         row.replayBtn:Show()
         row.shareBtn:Show()
+        row.importedTag:Hide()
     else
         row.replayBtn:Hide()
         row.shareBtn:Hide()
+        row.importedTag:SetShown(game.imported and true or false)
     end
 end
 
@@ -5195,6 +5222,8 @@ function RefreshSessions()
                 -- Result
                 if game.result == "WIN" then
                     mrow.result:SetText("|cff00ff00WIN|r")
+                elseif game.result == "DRAW" then
+                    mrow.result:SetText("|cffcccc66DRAW|r")
                 else
                     mrow.result:SetText("|cffff0000LOSS|r")
                 end
@@ -7130,6 +7159,274 @@ local function RegisterSubCommands()
 end
 
 ---------------------------------------------------------------------------
+-- ArenaAnalytics import
+-- One-click migration of an ArenaAnalytics history into TrinketedHistoryDB,
+-- so switching addons doesn't mean abandoning your record. Reads the
+-- ArenaAnalyticsDB SavedVariable (per character — ArenaAnalytics must be
+-- enabled for it to exist) and converts its compact format (formatVersion 6:
+-- negative integer keys, name/realm string pools, "a|b|c" packed stats)
+-- into native game records. Imported games have no eventLog — replays exist
+-- only for games Trinketed records live — and carry `imported` so the row
+-- shows an Imported tag and external tools can tell them apart. One
+-- table-valued local (200-locals limit).
+---------------------------------------------------------------------------
+local aaImport = {}
+
+-- ArenaAnalytics matchKeys / playerKeys (its ArenaMatch.lua), only the ones
+-- the conversion reads. The whole record is keyed on these small negative
+-- integers; the string pools live beside the array part of the DB.
+aaImport.MK = { date = 0, duration = -1, map = -2, bracket = -3, matchType = -4,
+    rating = -5, ratingDelta = -6, mmr = -7, enemyMMR = -10, season = -11, outcome = -13,
+    team = -14, enemyTeam = -15 }
+aaImport.PK = { name = 0, realm = -1, race = -2, spec = -3, isSelf = -5,
+    ratedInfo = -7, stats = -8 }
+
+aaImport.BRACKETS = { [1] = "2v2", [2] = "3v3", [3] = "5v5" } -- 4 = shuffle, not in TBC
+aaImport.MATCH_TYPES = { [1] = "rated", [2] = "skirmish", [3] = "wargame" }
+aaImport.MAPS = { [1] = "Blade's Edge Arena", [2] = "Ruins of Lordaeron", [3] = "Nagrand Arena" }
+
+-- AA race IDs are odd = Alliance / even = Horde; TBC rows of its table
+aaImport.RACES = {
+    [1] = "Human", [3] = "Dwarf", [5] = "Night Elf", [7] = "Gnome", [9] = "Draenei",
+    [2] = "Orc", [4] = "Undead", [6] = "Tauren", [8] = "Troll", [10] = "Blood Elf",
+}
+
+-- AA spec IDs encode the class in the tens digit; TBC classes only.
+-- "Preg" (13) is AA's shockadin hybrid — kept as-is, it's just a string.
+aaImport.CLASSES = {
+    [0] = "Druid", [1] = "Paladin", [2] = "Shaman", [4] = "Hunter", [5] = "Mage",
+    [6] = "Rogue", [7] = "Warlock", [8] = "Warrior", [9] = "Priest",
+}
+aaImport.SPECS = {
+    [1] = "Restoration", [2] = "Feral", [3] = "Balance",
+    [11] = "Holy", [12] = "Protection", [13] = "Preg", [14] = "Retribution",
+    [21] = "Restoration", [22] = "Elemental", [23] = "Enhancement",
+    [41] = "Beast Mastery", [42] = "Marksmanship", [43] = "Survival",
+    [51] = "Frost", [52] = "Fire", [53] = "Arcane",
+    [61] = "Subtlety", [62] = "Assassination", [63] = "Combat",
+    [71] = "Affliction", [72] = "Destruction", [73] = "Demonology",
+    [81] = "Protection", [82] = "Arms", [83] = "Fury",
+    [91] = "Discipline", [92] = "Holy", [93] = "Shadow",
+}
+
+-- One AA compact player → a native team entry (plus whether it is the
+-- recording character). names/realms are the AA DB's string pools.
+function aaImport.ConvertPlayer(p, names, realms)
+    if type(p) ~= "table" then return nil end
+    local PK = aaImport.PK
+    local name = names[tonumber(p[PK.name]) or 0]
+    if type(name) ~= "string" then return nil end
+    local realm = p[PK.realm] and realms[tonumber(p[PK.realm])] or nil
+    local specId = tonumber(p[PK.spec])
+    local entry = {
+        name = StripRealm(name),
+        fullName = (type(realm) == "string") and (name .. "-" .. realm) or name,
+        class = specId and aaImport.CLASSES[math.floor(specId / 10)] or nil,
+        spec = specId and aaImport.SPECS[specId] or nil,
+        race = aaImport.RACES[tonumber(p[PK.race])],
+    }
+    if type(p[PK.stats]) == "string" then -- "kills|deaths|damage|healing"
+        local kills, deaths, damage, healing = strsplit("|", p[PK.stats], 5)
+        entry.kbs = tonumber(kills)
+        entry.deaths = tonumber(deaths)
+        entry.damage = tonumber(damage)
+        entry.healing = tonumber(healing)
+    end
+    if type(p[PK.ratedInfo]) == "string" then -- "rating|ratingDelta|mmr|mmrDelta"
+        local _, ratingDelta, mmr, mmrDelta = strsplit("|", p[PK.ratedInfo], 5)
+        entry.ratingChange = tonumber(ratingDelta)
+        entry.mmr = tonumber(mmr)
+        entry.mmrChange = tonumber(mmrDelta)
+    end
+    return entry, p[PK.isSelf] and true or false
+end
+
+-- One AA compact match → a native game record, or nil + reason:
+-- "bracket" = not a 2s/3s/5s arena match, "outcome" = result never known.
+function aaImport.Convert(m, names, realms)
+    local MK = aaImport.MK
+    local bracket = aaImport.BRACKETS[tonumber(m[MK.bracket])]
+    local date = tonumber(m[MK.date])
+    if not bracket or not date then return nil, "bracket" end
+    -- AA outcome: 0 = loss, 1 = win, 2 = draw, nil = unknown
+    local outcome = tonumber(m[MK.outcome])
+    local result = (outcome == 1 and "WIN") or (outcome == 0 and "LOSS")
+        or (outcome == 2 and "DRAW") or nil
+    if not result then return nil, "outcome" end
+
+    local friendlyTeam, enemyTeam, enemyComp, seenClass = {}, {}, {}, {}
+    local selfName, selfRealm
+    for _, p in ipairs(m[MK.team] or {}) do
+        local entry, isSelf = aaImport.ConvertPlayer(p, names, realms)
+        if entry then
+            friendlyTeam[#friendlyTeam + 1] = entry
+            if isSelf then
+                selfName = entry.name
+                selfRealm = entry.fullName:match("%-(.+)$")
+            end
+        end
+    end
+    for _, p in ipairs(m[MK.enemyTeam] or {}) do
+        local entry = aaImport.ConvertPlayer(p, names, realms)
+        if entry then
+            enemyTeam[#enemyTeam + 1] = entry
+            if entry.class and not seenClass[entry.class] then
+                enemyComp[#enemyComp + 1] = entry.class
+                seenClass[entry.class] = true
+            end
+        end
+    end
+
+    local duration = tonumber(m[MK.duration])
+    -- AA stores the post-match rating plus the delta (its tracker samples
+    -- GetPersonalRatedInfo after the game); before is derived.
+    local rating = tonumber(m[MK.rating])
+    local delta = tonumber(m[MK.ratingDelta])
+    return {
+        id = GenerateGameId(),
+        aaKey = date .. "|" .. tostring(m[MK.bracket]),
+        imported = "ArenaAnalytics",
+        startTime = date, -- AA stamps the match start
+        endTime = duration and (date + duration) or nil,
+        map = aaImport.MAPS[tonumber(m[MK.map])],
+        bracket = bracket,
+        matchType = aaImport.MATCH_TYPES[tonumber(m[MK.matchType])],
+        season = tonumber(m[MK.season]) or 1,
+        result = result,
+        playerName = selfName or StripRealm(UnitName("player")),
+        playerRealm = selfRealm
+            or (GetNormalizedRealmName and GetNormalizedRealmName()) or GetRealmName(),
+        friendlyTeam = friendlyTeam,
+        enemyTeam = enemyTeam,
+        enemyComp = enemyComp,
+        ratingAfter = rating,
+        ratingChange = delta,
+        ratingBefore = (rating and delta) and (rating - delta) or nil,
+        mmrBefore = tonumber(m[MK.mmr]), -- AA stores pre-match MMR
+        enemyMMR = tonumber(m[MK.enemyMMR]),
+    }
+end
+
+-- Look at ArenaAnalyticsDB and classify every match without changing
+-- anything. nil + reason when there is nothing usable ("missing"/"version"),
+-- else a summary with the convertible records ready to insert.
+function aaImport.Scan()
+    local db = _G.ArenaAnalyticsDB
+    if type(db) ~= "table" or type(db.names) ~= "table" or type(db.realms) ~= "table" then
+        return nil, "missing"
+    end
+    if db.formatVersion ~= 6 then
+        return nil, "version"
+    end
+
+    -- Dedup index over the existing history: imported games by their AA
+    -- identity (so re-clicking is a no-op), live-recorded games by
+    -- bracket + start minute so a game BOTH addons recorded isn't imported
+    -- again (±2 min tolerance between the two addons' start stamps).
+    local byKey, byMinute = {}, {}
+    for _, g in ipairs(TrinketedHistoryDB.games) do
+        if g.aaKey then byKey[g.aaKey] = true end
+        if not g.imported and g.startTime and g.bracket then
+            byMinute[g.bracket .. ":" .. math.floor(g.startTime / 60)] = true
+        end
+    end
+
+    local out = { total = 0, new = {}, dupes = 0, skipped = 0 }
+    for _, m in ipairs(db) do
+        if type(m) == "table" then
+            out.total = out.total + 1
+            local rec = aaImport.Convert(m, db.names, db.realms)
+            if not rec then
+                out.skipped = out.skipped + 1
+            elseif byKey[rec.aaKey] then
+                out.dupes = out.dupes + 1
+            else
+                local dupe = false
+                local minute = math.floor(rec.startTime / 60)
+                for i = -2, 2 do
+                    if byMinute[rec.bracket .. ":" .. (minute + i)] then
+                        dupe = true
+                        break
+                    end
+                end
+                if dupe then
+                    out.dupes = out.dupes + 1
+                else
+                    out.new[#out.new + 1] = rec
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- The one-click import: convert everything new, insert, re-sort the DB
+-- chronologically (imports are usually older than the native games — and
+-- sessions grouping plus the newest-first Matches list both assume append
+-- order = time order), refresh. Safe to click repeatedly: Scan dedups
+-- against previous runs.
+function aaImport.Run()
+    local scan, why = aaImport.Scan()
+    if not scan then
+        ChatMsg(why == "version"
+            and "ArenaAnalytics history uses an unsupported format version — update Trinketed."
+            or "No ArenaAnalytics history found — enable the ArenaAnalytics addon and /reload, then retry.")
+        return
+    end
+    if #scan.new == 0 then
+        ChatMsg("Nothing to import — all " .. scan.total .. " ArenaAnalytics games are already in your history.")
+        aaImport.UpdateUI()
+        return
+    end
+
+    local oldSeasons = false
+    for _, rec in ipairs(scan.new) do
+        table.insert(TrinketedHistoryDB.games, rec)
+        if rec.season ~= currentSeason then oldSeasons = true end
+    end
+    table.sort(TrinketedHistoryDB.games, function(a, b)
+        return (a.startTime or 0) < (b.startTime or 0)
+    end)
+
+    ChatMsg("Imported |cffE8B923" .. #scan.new .. "|r games from ArenaAnalytics ("
+        .. scan.dupes .. " already present, " .. scan.skipped .. " unusable).")
+    if oldSeasons then
+        ChatMsg("Some imported games are from earlier seasons — set the Season filter to All to see them.")
+    end
+
+    -- Like recorded games, imports live only in memory until SavedVariables
+    -- flush — reuse the reload nudge so they reach disk (and the web app).
+    unsyncedGames = unsyncedGames + #scan.new
+    if UpdateSyncNudge then UpdateSyncNudge() end
+    aaImport.UpdateUI()
+    RefreshHistory()
+end
+
+-- Refresh the Settings-tab status line + button. No-op until the settings
+-- tab has been built (aaImport.status/btn exist).
+function aaImport.UpdateUI()
+    if not aaImport.status then return end
+    local scan, why = aaImport.Scan()
+    if not scan then
+        aaImport.btn:Hide()
+        aaImport.status:SetText(why == "version"
+            and "ArenaAnalytics history found, but its format version is unsupported."
+            or "No ArenaAnalytics history found on this character — enable the ArenaAnalytics addon and /reload.")
+        aaImport.status:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    elseif #scan.new > 0 then
+        aaImport.btn:Show()
+        aaImport.status:SetText(scan.total .. " ArenaAnalytics game" .. (scan.total == 1 and "" or "s")
+            .. " found for this character — |cffE8B923" .. #scan.new .. " new|r.")
+        aaImport.status:SetTextColor(C.textNormal[1], C.textNormal[2], C.textNormal[3])
+    else
+        aaImport.btn:Hide()
+        aaImport.status:SetText(scan.total .. " ArenaAnalytics game" .. (scan.total == 1 and "" or "s")
+            .. " found — all already in your history.")
+        aaImport.status:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+    end
+end
+
+---------------------------------------------------------------------------
 -- Register with Trinketed Options Panel
 ---------------------------------------------------------------------------
 local settingsBuilt = false
@@ -7150,6 +7447,30 @@ lib:RegisterSubAddon("History", {
                     UpdateOverlayVisibility()
                 end)
 
+            y = y - 40
+            y = lib:CreateSectionHeader(settingsContainer, y, "IMPORT — ARENAANALYTICS")
+
+            aaImport.status = settingsContainer:CreateFontString(nil, "OVERLAY")
+            aaImport.status:SetFont(lib.FONT_BODY, 10, "")
+            aaImport.status:SetPoint("TOPLEFT", 20, y)
+            aaImport.status:SetJustifyH("LEFT")
+
+            aaImport.btn = lib:CreateButton(settingsContainer, 20, y - 24, 200,
+                "Import from ArenaAnalytics", aaImport.Run)
+
+            local note = settingsContainer:CreateFontString(nil, "OVERLAY")
+            note:SetFont(lib.FONT_BODY, 9, "")
+            note:SetPoint("TOPLEFT", 20, y - 56)
+            note:SetJustifyH("LEFT")
+            note:SetSpacing(3)
+            note:SetText("Keeps results, ratings, rosters and match type. Imported games have no"
+                .. "\nreplay — replays exist only for games Trinketed records live.")
+            note:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+            -- Counts go stale as games are imported or recorded — recompute
+            -- every time the Settings tab is shown.
+            settingsContainer:HookScript("OnShow", aaImport.UpdateUI)
+            aaImport.UpdateUI()
         end
 
         -- Embed the history content directly in the options panel
