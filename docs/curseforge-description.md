@@ -19,7 +19,8 @@ every arena game you play.
   (the victim's final seconds — damage, healing, absorbs, CC).
 - **Stats that answer questions**: sessions, teams, and enemies tabs with
   win rates and net rating; filter matches by bracket, comp (same slot
-  builder as the web app), season, or free-text search.
+  builder as the web app), match type (skirmishes are detected and kept
+  out of your rated list), season, or free-text search.
 - **Share strings**: `/trinketed share` exports a match; anyone with the
   addon can `/trinketed import` it and watch the replay.
 

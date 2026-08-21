@@ -579,6 +579,69 @@ local function HasPrepBuff()
     return false
 end
 
+---------------------------------------------------------------------------
+-- Match type: rated / skirmish / wargame
+-- Skirmishes carry no rating, so without this they sit in the history as
+-- rating-less rated games and quietly distort the list. Detection, the
+-- filter state and the labels live on one table-valued local (200-locals
+-- limit). The filter state can't live in `filters` — that table is declared
+-- further down the chunk, out of scope for the functions here.
+---------------------------------------------------------------------------
+local matchType = {
+    filter = nil,  -- Matches tab: nil = all, "rated", "skirmish"
+    dd = nil,      -- filter dropdown, created with the Matches filter rows
+}
+
+-- Read the type of the battlefield we are standing in. Only meaningful
+-- inside an arena — these predicates describe the active match, never a
+-- queue — and nil whenever the client won't say, which is never treated as
+-- "skirmish". Order follows ArenaAnalytics: rated wins, so a stale skirmish
+-- flag can't mislabel a rated game.
+function matchType.Detect()
+    if not (IsActiveBattlefieldArena and IsActiveBattlefieldArena()) then return nil end
+    local isSkirmish = (IsArenaSkirmish and IsArenaSkirmish()) and true or false
+    local isWargame = (IsWargame and IsWargame()) and true or false
+    -- IsRatedMap is the 2.5.x name (what this client has); IsRatedArena the
+    -- retail one. Last resort: IsActiveBattlefieldArena's second return,
+    -- Blizzard's own "registered" (= rated team) flag.
+    local isRated
+    if C_PvP and C_PvP.IsRatedMap then
+        isRated = C_PvP.IsRatedMap()
+    elseif C_PvP and C_PvP.IsRatedArena then
+        isRated = C_PvP.IsRatedArena()
+    else
+        isRated = select(2, IsActiveBattlefieldArena())
+    end
+    if isRated and not isSkirmish and not isWargame then return "rated" end
+    if isWargame then return "wargame" end
+    if isSkirmish then return "skirmish" end
+    return nil
+end
+
+-- Human label for a match that isn't plain rated ("Skirmish"/"Wargame"),
+-- nil otherwise — including games recorded before this field existed.
+function matchType.Label(game)
+    local mt = game and game.matchType
+    if mt == "skirmish" then return "Skirmish" end
+    if mt == "wargame" then return "Wargame" end
+    return nil
+end
+
+-- Does a saved record pass the Matches tab's type filter? "Rated" means
+-- "not flagged a skirmish", so games recorded before detection existed stay
+-- visible rather than vanishing into an unknown bucket.
+function matchType.Passes(game)
+    if not matchType.filter then return true end
+    if matchType.filter == "skirmish" then return game.matchType == "skirmish" end
+    return game.matchType ~= "skirmish"
+end
+
+function matchType.FilterLabel()
+    if matchType.filter == "skirmish" then return "Type: Skirmish" end
+    if matchType.filter == "rated" then return "Type: Rated" end
+    return "Type: All"
+end
+
 local function StripRealm(name)
     if not name then return nil end
     return name:match("^([^%-]+)") or name
@@ -1472,6 +1535,10 @@ local function InitMatch()
         startTime = nil,
         endTime = nil,
         map = GetRealZoneText(),
+        -- Sampled at arena entry; nil until the client knows, so the gates
+        -- and the save re-ask. Not saved from here — SaveMatch copies it
+        -- onto the record explicitly, like every other field.
+        matchType = matchType.Detect(),
         result = nil,
         duration = nil,
         playerGUID = UnitGUID("player"),
@@ -1585,6 +1652,10 @@ local function StartRecording(gateAt)
 
     -- Snapshot ratings
     ratingsBefore = SnapshotAllRatings()
+
+    -- Second chance to type the match (and the first one reload recovery
+    -- gets, since it rebuilds the match table from the in-flight copy).
+    currentMatch.matchType = currentMatch.matchType or matchType.Detect()
 
     -- Snapshot roster
     SnapshotRoster()
@@ -1705,6 +1776,12 @@ local function SaveMatch(result)
     -- Compress event log
     local compressedEventLog = CompressEventLog()
 
+    -- Last chance to type the match while we're still standing in it: a
+    -- save from the fallback timer can beat every earlier probe. A salvage
+    -- save runs outside the arena, where Detect() returns nil and whatever
+    -- we learned during the game stands.
+    currentMatch.matchType = currentMatch.matchType or matchType.Detect()
+
     -- Capture arena season (defaults to 1 if API missing or returns 0/nil)
     local season = GetCurrentArenaSeason and GetCurrentArenaSeason() or nil
     if not season or season == 0 then season = 1 end
@@ -1730,6 +1807,7 @@ local function SaveMatch(result)
         friendlyTeam = friendlyTeam,
         enemyTeam = enemyTeam,
         bracket = bracket,
+        matchType = currentMatch.matchType,
         season = season,
         ratingBefore = currentMatch.ratingBefore,
         ratingAfter = currentMatch.ratingAfter,
@@ -1773,7 +1851,10 @@ local function SaveMatch(result)
             (record.mmrChange and record.mmrChange ~= 0
                 and string.format(" (%+d)", record.mmrChange) or "") .. "]|r"
     end
-    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. ratingStr .. mmrStr ..
+    -- Name the type only when it isn't a plain rated game
+    local typeStr = matchType.Label(record)
+    typeStr = typeStr and (" |cff888888[" .. typeStr .. "]|r") or ""
+    print("|cff00ccff" .. DISPLAY_NAME .. ":|r Game #" .. count .. " recorded — " .. result .. typeStr .. ratingStr .. mmrStr ..
         " | " .. eventCount .. " events | " .. string.format("%.1fs", currentMatch.duration))
 
     unsyncedGames = unsyncedGames + 1
@@ -2540,6 +2621,11 @@ local function GameMatchesFilters(game)
     if next(filters.maps) then
         if not game.map or not filters.maps[game.map] then return false end
     end
+    -- Type filter (single-select): skirmishes have no rating, so mixing
+    -- them into a rated list is noise
+    if not matchType.Passes(game) then
+        return false
+    end
     -- Bracket filter (single-select)
     if filters.bracket and filters.bracket ~= "All" and game.bracket ~= filters.bracket then
         return false
@@ -2562,7 +2648,7 @@ local function GameMatchesFilters(game)
                     add(p.name); add(p.class); add(p.spec); add(p.race)
                 end
             end
-            add(game.map); add(game.bracket)
+            add(game.map); add(game.bracket); add(game.matchType)
             hay = table.concat(parts, " "):lower()
             searchTextCache[game] = hay
         end
@@ -3540,6 +3626,28 @@ histSearchBox:SetScript("OnEscapePressed", function(self)
     self:ClearFocus()
 end)
 
+-- Match type filter: sits in row 3 beside the search box, the only row
+-- with space. Single-select — clicking the active entry clears it.
+matchType.dd = CreateSearchableDropdown(matchesContainer, "TkTypeDD", 130, {
+    defaultLabel = matchType.FilterLabel(),
+    autoClose = true,
+    getOptions = function()
+        return {
+            { key = "rated", text = "Rated", searchText = "rated",
+              isChecked = function() return matchType.filter == "rated" end },
+            { key = "skirmish", text = "Skirmish", searchText = "skirmish",
+              isChecked = function() return matchType.filter == "skirmish" end },
+        }
+    end,
+    onToggle = function(key)
+        matchType.filter = (matchType.filter == key) and nil or key
+        RefreshHistory()
+    end,
+    onClear = function() matchType.filter = nil; RefreshHistory() end,
+    getLabel = matchType.FilterLabel,
+})
+matchType.dd.frame:SetPoint("TOPLEFT", 300, -62)
+
 -- Reset button (positioned from the right, in row 1)
 local resetBtn = CreateFrame("Button", nil, matchesContainer)
 resetBtn:SetSize(60, 24)
@@ -3577,6 +3685,8 @@ resetBtn:SetScript("OnClick", function()
     filters.result = nil
     filters.bracket = "All"
     filters.season = currentSeason
+    matchType.filter = nil
+    matchType.dd:SetLabel(matchType.FilterLabel())
     histSearchBox:SetText("")
     partnerDD:SetLabel("Partner: All")
     enemyPlayerDD:SetLabel("Enemy Players: All")
@@ -3649,6 +3759,7 @@ local function UpdateResetButton()
         next(filters.enemyCompFilter.classes) or next(filters.enemyPlayers) or
         next(filters.enemyRaces) or next(filters.maps) or
         filters.result ~= nil or filters.bracket ~= "All" or
+        matchType.filter ~= nil or
         filters.season ~= currentSeason or filters.search ~= ""
     resetBtn:SetShown(active and true or false)
 end
@@ -3927,7 +4038,12 @@ end
 
 -- Rating change as "<after> (+<change>)" green/red, or em-dash when absent
 local function FormatRatingChange(game)
-    if not game.ratingChange then return "|cff555555—|r" end
+    if not game.ratingChange then
+        -- A skirmish has no rating by definition — say so, rather than
+        -- showing the em-dash that means "rated game, data missing".
+        local label = matchType.Label(game)
+        return label and ("|cff888888" .. label .. "|r") or "|cff555555—|r"
+    end
     local sign = game.ratingChange >= 0 and "+" or ""
     local color = game.ratingChange >= 0 and "|cff00ff00" or "|cffff0000"
     if game.ratingAfter then
@@ -4274,6 +4390,7 @@ function historyView:MakeRow()
             GameTooltip:AddLine("Dev — game record", C.accent[1], C.accent[2], C.accent[3])
             GameTooltip:AddDoubleLine("id", g.id or "(none — pre-id game)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             GameTooltip:AddDoubleLine("db index", tostring(self.dbIndex), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
+            GameTooltip:AddDoubleLine("matchType", g.matchType or "(undetected)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             GameTooltip:AddDoubleLine("eventLog", g.eventLog and (#g.eventLog .. " chars") or "(none)", 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             GameTooltip:AddDoubleLine("startTime", tostring(g.startTime), 0.55, 0.55, 0.55, 0.9, 0.9, 0.9)
             if g.serverStartTime then
@@ -4394,6 +4511,7 @@ function RefreshHistory()
         end
         TrinketedHistoryDB.settings.historyFilters = {
             bracket = filters.bracket,
+            matchType = matchType.filter,
             friendlyComp = snapComp(filters.friendlyCompFilter),
             enemyComp = snapComp(filters.enemyCompFilter),
         }
@@ -6323,9 +6441,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
             TrinketedHistoryDB.settings.hiddenReplayCDs = TrinketedHistoryDB.settings.hiddenReplayCDs or {}
 
             -- Restore the Matches tab's persisted filter state (comp
-            -- slots + bracket; written by RefreshHistory). Mutating the
-            -- filters table is enough — the chip/slot visuals re-read it
-            -- on every panel open (OnShow → RefreshHistory → CS.Update).
+            -- slots + bracket + match type; written by RefreshHistory).
+            -- Mutating the filters table is enough — the chip/slot visuals
+            -- re-read it on every panel open (OnShow → RefreshHistory →
+            -- CS.Update).
             -- Season is deliberately not persisted: it re-defaults to the
             -- live season on every panel open (seasonDefault:Apply), and
             -- a stale saved season would fight that.
@@ -6334,6 +6453,12 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 if savedHF.bracket == "2v2" or savedHF.bracket == "3v3"
                     or savedHF.bracket == "5v5" or savedHF.bracket == "All" then
                     filters.bracket = savedHF.bracket
+                end
+                -- The type dropdown caches its label, so unlike the chips it
+                -- needs telling as well as setting.
+                if savedHF.matchType == "rated" or savedHF.matchType == "skirmish" then
+                    matchType.filter = savedHF.matchType
+                    matchType.dd:SetLabel(matchType.FilterLabel())
                 end
                 local slugOK = {}
                 for _, c in ipairs(BUILDER_CLASSES) do slugOK[c:lower()] = true end
