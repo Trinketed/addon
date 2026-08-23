@@ -10,6 +10,9 @@ on:
     # number and pushes a redundant CurseForge file. A push touching any other
     # path still tags as before, including a mixed docs+code push. To force a
     # release for an ignored-only change, push a tag by hand.
+    # KEEP IN SYNC WITH pkgmeta.yaml's `ignore:` LIST — by hand, there is no
+    # check. If a path is stripped by pkgmeta but missing here, pushing it
+    # cuts a version whose build is identical to the last one.
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -18,6 +21,12 @@ on:
       - '.github/**'
       - '.gitignore'
       - 'addons.json'
+      # Local-only modules, stripped from builds by pkgmeta. REMOVE THESE
+      # THREE (here and in pkgmeta.yaml) in the same commit that ships them,
+      # or their first release will be silently suppressed.
+      - 'TrinketedAuras/**'
+      - 'TrinketedLC/**'
+      - 'TrinketedLOS/**'
 
 jobs:
   tag:
