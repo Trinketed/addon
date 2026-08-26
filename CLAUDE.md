@@ -15,7 +15,7 @@ Trinketed is a World of Warcraft addon suite for arena PvP on the Anniversary (T
 
 "Local-only" = tracked in git and loaded on dev machines, but listed under `ignore` in `pkgmeta.yaml` so releases exclude it. To ship a module: remove its `ignore` entry, add a `move-folders` line.
 
-All code is Lua 5.1 targeting the WoW retail 11.x API (Interface 110207 — the Anniversary client runs the retail engine). Guard newer APIs: prefer the `C_Spell and C_Spell.GetSpellInfo ... elseif GetSpellInfo` fallback pattern (see `TrinketedCD/Tracker.lua`).
+All code is Lua 5.1 targeting the WoW **TBC Classic 2.5.5 API (Interface 20505**, packager `-g bcc` — pivoted from the earlier retail/110207 target in commit `f6c758a`; corrected here 2026-08-26). Retail-only APIs do not exist on this client. Where an API differs across flavors, keep the guarded fallback pattern (`C_Spell and C_Spell.GetSpellInfo ... elseif GetSpellInfo`, see `TrinketedCD/Tracker.lua`).
 
 ## Development Workflow
 
@@ -68,7 +68,7 @@ junctions are the delivery path, not the packaged build.
 No local build step needed for testing (junctions). The BigWigsMods packager runs in CI:
 
 - **Auto-tag:** a push to `main` triggers `auto-tag.yml` → bumps patch tag (`RELEASE_TOKEN` PAT, org-level secret). Pushes touching *only* build-stripped paths (`**.md`, `docs/`, `tools/`, `.claude/`, `.github/`, `.gitignore`, `addons.json`) are skipped via `paths-ignore` — they'd produce a byte-identical build. A mixed docs+code push still tags. To release an ignored-only change, push a tag by hand. Keep that list in sync with `pkgmeta.yaml`'s `ignore` when either changes.
-- **Release:** the new tag triggers `release.yml` → `BigWigsMods/packager@v2 -g retail` → GitHub Release (CurseForge upload activates once `CF_API_KEY` secret and `## X-Curse-Project-ID` in `Trinketed.toc` exist)
+- **Release:** the new tag triggers `release.yml` → `BigWigsMods/packager@v2 -g bcc` → GitHub Release **and CurseForge upload — both live** (`CF_API_KEY` secret + `## X-Curse-Project-ID` in `Trinketed.toc` are wired; every push to `main` that touches shipped code becomes a public release)
 - **Version placeholder:** `.toc` files use `@project-version@` — never hardcode versions
 - `pkgmeta.yaml`: externals (LibStub, LibDeflate, DRList-1.0 — committed copies in `Libs/` exist for dev, replaced from upstream at build time), `move-folders` hoists shipped modules to siblings, `ignore` strips dev files + local-only modules
 - Local package build (WSL): `bash /tmp/release.sh -e -d -z -g retail` after fetching the packager's `release.sh`; output in `.release/` (gitignored)
@@ -102,7 +102,7 @@ Isolated per addon: `TrinketedDB` (core), `TrinketedCDDB`, `TrinketedHistoryDB`,
 ### Known Constraints
 
 - `TrinketedHistory/Core.lua` is close to Lua's 200-locals-per-chunk limit — when adding features, prefer one table-valued local holding related state/functions over multiple chunk-level locals.
-- Compile-check Lua before committing (no luac on the system; fengari via Node works — load each file with `luaL_loadstring` and assert OK).
+- Compile-check Lua before committing: `luac5.1 -p <file>` in WSL (`/usr/bin/luac5.1` exists — the earlier "no luac on the system" note was stale); fengari via Node also works.
 - Frames are never garbage-collected: pool and reuse rows/icons; never recreate frames per refresh.
 
 ## Key Files

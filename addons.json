@@ -14,5 +14,10 @@
     "name": "TrinketedHistory",
     "description": "Match history, replays & VOD timestamps",
     "color": "#22C55E"
+  },
+  {
+    "name": "TrinketedLadder",
+    "description": "In-game arena ladder & activity feed (desktop app companion)",
+    "color": "#A855F7"
   }
 ]

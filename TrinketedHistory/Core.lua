@@ -5984,6 +5984,10 @@ minimapButton:SetScript("OnClick", function(self, button)
         local count = TrinketedHistoryDB and #TrinketedHistoryDB.games or 0
         print("|cff00ccff" .. DISPLAY_NAME .. ":|r " .. count .. " games recorded.")
         print("  /trinketed history — toggle game history")
+        -- Guarded at click time: only when the TrinketedLadder module is loaded.
+        if lib:GetSubCommand("ladder") then
+            print("  /trinketed ladder — in-game ladder & activity feed")
+        end
         print("  /trinketed minimap — toggle minimap button")
         print("  /trinketed hdebug — toggle history debug logging")
         print("  /trinketed dev — toggle developer mode (raw-data inspection)")

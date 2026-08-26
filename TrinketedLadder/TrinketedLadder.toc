@@ -1,0 +1,9 @@
+## Interface: 20505
+## Title: Trinketed - Ladder
+## Notes: In-game arena ladder and activity feed (data via the Trinketed desktop app)
+## Author: apwek
+## Version: @project-version@
+## Dependencies: Trinketed
+## OptionalDeps: TrinketedData
+
+Core.lua
