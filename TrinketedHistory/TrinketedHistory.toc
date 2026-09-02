@@ -13,3 +13,4 @@ ReplaySpells.lua
 ReplayEngine.lua
 ReplayUI.lua
 Core.lua
+Overlay.lua

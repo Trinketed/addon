@@ -7452,6 +7452,24 @@ lib:RegisterSubAddon("History", {
                 end)
 
             y = y - 40
+            y = lib:CreateSectionHeader(settingsContainer, y, "STREAM OVERLAY")
+
+            lib:CreateCheckbox(settingsContainer, 20, y, "Show the stream overlay",
+                TrinketedHistoryDB.overlay and TrinketedHistoryDB.overlay.enabled or false,
+                function(isOn)
+                    if addon.Overlay then addon.Overlay:SetEnabled(isOn) end
+                end)
+
+            local ovNote = settingsContainer:CreateFontString(nil, "OVERLAY")
+            ovNote:SetFont(lib.FONT_BODY, 9, "")
+            ovNote:SetPoint("TOPLEFT", 20, y - 24)
+            ovNote:SetJustifyH("LEFT")
+            ovNote:SetSpacing(3)
+            ovNote:SetText("Recent results and session stats on screen — click a game to open its"
+                .. "\nreplay. Position, brackets and style: /tko settings.")
+            ovNote:SetTextColor(C.textDim[1], C.textDim[2], C.textDim[3])
+
+            y = y - 64
             y = lib:CreateSectionHeader(settingsContainer, y, "IMPORT — ARENAANALYTICS")
 
             aaImport.status = settingsContainer:CreateFontString(nil, "OVERLAY")

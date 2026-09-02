@@ -55,7 +55,20 @@ lib.C = {
     -- Feedback
     statusSuccess = { 0.290, 0.870, 0.500 },
     statusError   = { 0.902, 0.224, 0.224 },
+
+    -- Match results (design_handoff_stream_overlay D8: aliases of the web
+    -- token family --success/--danger, not new hues — re-point here if the
+    -- suite ever splits win-green from success-green)
+    win      = { 0.561, 0.722, 0.420 },   -- #8FB86B
+    loss     = { 0.851, 0.353, 0.275 },   -- #D95A46
+    winText  = { 0.561, 0.722, 0.420 },   -- #8FB86B
+    lossText = { 0.886, 0.416, 0.322 },   -- #E26A52
+    onChip   = { 0.055, 0.047, 0.031 },   -- #0E0C08 (text on win/loss chips)
 }
+
+-- Surface alpha for stream-facing overlay panels (D7): scene faintly present
+-- through the panel; apply to surface rects, never to the frame itself.
+lib.OVERLAY_ALPHA = 0.92
 
 ---------------------------------------------------------------------------
 -- Version Helper
